@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Smooth UI with Advanced Color Picker</title>
+<style>
+body{margin:0;height:100vh;overflow:hidden;background:radial-gradient(circle at top,#2a2a2a,#111);color:white;font-family:Arial,sans-serif}
+#watermark{position:fixed;top:10px;left:10px;font-size:14px;opacity:.8}
+#versionPopup{position:fixed;top:20px;left:50%;transform:translateX(-50%) translateY(-80px) scale(.92);padding:10px 16px;border-radius:14px;background:rgba(0,0,0,.35);backdrop-filter:blur(18px);border:1px solid rgba(255,255,255,.12);font-size:16px;font-weight:bold;opacity:0;pointer-events:none;transition:opacity .35s ease,transform .35s ease;z-index:9999}
+#versionPopup.show{opacity:.5;transform:translateX(-50%) translateY(0) scale(1)}
+#counter{position:fixed;top:50%;left:50%;font-size:5em;transform:translate(-50%,-50%);user-select:none;will-change:transform}
+#timer{position:fixed;top:10px;right:20px;font-size:1.5em;user-select:none;will-change:transform}
+.selected{outline:2px solid #ffe066;border-radius:10px;animation:selectedFade 1.6s ease-in-out infinite}
+@keyframes selectedFade{0%{box-shadow:0 0 6px rgba(255,224,102,.3),0 0 14px rgba(255,224,102,.15)}50%{box-shadow:0 0 20px rgba(255,224,102,1),0 0 45px rgba(255,224,102,.6)}100%{box-shadow:0 0 6px rgba(255,224,102,.3),0 0 14px rgba(255,224,102,.15)}}
+.panel{position:fixed;top:50px;width:260px;padding:14px;border-radius:18px;backdrop-filter:blur(25px);background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18);box-shadow:0 20px 50px rgba(0,0,0,.6);opacity:0;transform:translateY(10px) scale(.95);pointer-events:none;transition:.3s ease;z-index:10}
+.panel.active{opacity:1;transform:translateY(0) scale(1);pointer-events:all}
+#panel{right:20px}
+#advancedPanel{left:20px;top:50px;width:300px;height:300px;padding:10px;border-radius:18px;background:rgba(255,255,255,.08);backdrop-filter:blur(25px);border:1px solid rgba(255,255,255,.18);opacity:0;pointer-events:none;transition:.3s ease;position:fixed;z-index:11}
+#advancedPanel.active{opacity:1;pointer-events:all}
+canvas#colorWheel{width:100%;height:100%;display:block;border-radius:50%;cursor:pointer}
+h3{margin:6px 0;font-size:.9em;color:#ddd}
+.font-option{padding:6px;margin:3px 0;border-radius:8px;cursor:pointer;background:rgba(255,255,255,.05);transition:background .2s ease,transform .2s ease}
+.font-option:hover{background:rgba(255,255,255,.12);transform:translateX(3px)}
+.color-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.color{height:26px;border-radius:6px;cursor:pointer;transition:transform .2s ease,box-shadow .2s ease}
+.color:hover{transform:scale(1.08);box-shadow:0 0 12px rgba(255,255,255,.35)}
+button{margin-top:10px;padding:6px 10px;border-radius:8px;background:rgba(255,255,255,.12);color:white;border:none;cursor:pointer;transition:.2s}
+button:hover{background:rgba(255,255,255,.25)}
+
+/* Auth */
+#authOverlay{position:fixed;inset:0;background:rgba(0,0,0,.7);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;z-index:10000;opacity:0;pointer-events:none;transition:opacity .35s ease}
+#authOverlay.active{opacity:1;pointer-events:all}
+#authBox{width:320px;padding:24px;border-radius:18px;background:rgba(28,28,28,.96);border:1px solid rgba(255,255,255,.12);box-shadow:0 25px 60px rgba(0,0,0,.7);transform:scale(.9) translateY(20px);opacity:0;transition:transform .4s cubic-bezier(.22,1,.36,1),opacity .35s ease}
+#authOverlay.active #authBox{transform:scale(1) translateY(0);opacity:1}
+#authBox h2{margin:0 0 16px;text-align:center;font-size:1.3em;font-weight:600}
+.auth-tabs{display:flex;gap:6px;margin-bottom:16px;background:rgba(255,255,255,.04);padding:3px;border-radius:10px}
+.auth-tab{flex:1;padding:7px;border-radius:8px;color:#888;cursor:pointer;text-align:center;font-size:.82em;font-weight:500;transition:.2s}
+.auth-tab.active{background:rgba(255,255,255,.1);color:#fff}
+.auth-field{margin-bottom:10px}
+.auth-field label{display:block;font-size:.72em;color:#888;margin-bottom:3px;font-weight:500}
+.auth-field input{width:100%;padding:9px 11px;border-radius:9px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#fff;font-size:.88em;outline:none;box-sizing:border-box;transition:border-color .2s}
+.auth-field input:focus{border-color:rgba(255,255,255,.3)}
+.auth-btn{width:100%;padding:10px;border-radius:9px;background:rgba(255,255,255,.12);color:#fff;border:none;cursor:pointer;font-size:.9em;font-weight:600;transition:.2s;margin-top:4px}
+.auth-btn:hover{background:rgba(255,255,255,.2)}
+.auth-msg{text-align:center;font-size:.78em;margin-top:8px;min-height:16px}
+.auth-msg.error{color:#ff6b6b}
+.auth-msg.success{color:#6bff8a}
+.auth-view{transition:opacity .3s ease,transform .3s ease}
+.auth-view.auth-hidden{display:none!important}
+.auth-view.slide-out-left{opacity:0;transform:translateX(-30px);position:absolute}
+.auth-view.slide-in{animation:slideIn .35s cubic-bezier(.22,1,.36,1) forwards}
+@keyframes slideIn{from{opacity:0;transform:translateX(20px) scale(.97)}to{opacity:1;transform:translateX(0) scale(1)}}
+
+/* Signed in */
+#signedInView{text-align:center}
+.account-email{font-size:.78em;color:#777;margin-bottom:18px}
+.account-email span{color:#bbb;font-weight:500}
+.account-actions{display:flex;flex-direction:column;gap:6px}
+.account-btn{width:100%;padding:10px;border-radius:9px;border:1px solid rgba(255,255,255,.07);cursor:pointer;font-size:.85em;font-weight:500;transition:all .2s ease;background:rgba(255,255,255,.04);color:#bbb}
+.account-btn:hover{background:rgba(255,255,255,.09);color:#eee;border-color:rgba(255,255,255,.12)}
+.account-btn.signout{background:rgba(255,80,80,.08);color:#ff7070;border-color:rgba(255,80,80,.15);margin-top:2px}
+.account-btn.signout:hover{background:rgba(255,80,80,.16);border-color:rgba(255,80,80,.3)}
+.account-btn.signout:active{transform:scale(.95)}
+.account-btn.signout.signing-out{animation:signoutGo .4s ease forwards;pointer-events:none}
+@keyframes signoutGo{0%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(.92) translateY(8px)}}
+
+/* Change password */
+.change-pass-wrap{overflow:hidden;max-height:0;transition:max-height .35s cubic-bezier(.22,1,.36,1),opacity .25s ease;opacity:0}
+.change-pass-wrap.open{max-height:250px;opacity:1}
+.change-pass-form{padding:12px 0 2px}
+.change-pass-form .auth-field{margin-bottom:7px}
+.change-pass-form .auth-field label{font-size:.68em}
+.change-pass-form .auth-field input{padding:7px 10px;font-size:.82em}
+.change-pass-form .auth-btn{padding:8px;font-size:.82em;margin-top:4px;background:rgba(100,180,255,.1);color:#7ab8ff;border:1px solid rgba(100,180,255,.18)}
+.change-pass-form .auth-btn:hover{background:rgba(100,180,255,.2)}
+</style>
+</head>
+<body>
+
+<div id="watermark">Made by S0nwy</div>
+<div id="versionPopup">V1.2.0</div>
+<div id="counter">0</div>
+<div id="timer">0:00:00</div>
+
+<div id="panel" class="panel">
+  <h3>Fonts</h3><div id="fontList"></div>
+  <h3>Colors</h3><div class="color-grid" id="colorGrid"></div>
+  <button id="advancedBtn">Advanced Settings</button>
+</div>
+
+<div id="advancedPanel" class="panel">
+  <canvas id="colorWheel"></canvas>
+</div>
+
+<div id="authOverlay">
+  <div id="authBox">
+    <h2 id="authTitle">Sign In</h2>
+    <div class="auth-tabs" id="authTabs">
+      <div class="auth-tab active" data-tab="signin" onclick="switchAuthTab('signin')">Sign In</div>
+      <div class="auth-tab" data-tab="signup" onclick="switchAuthTab('signup')">Sign Up</div>
+    </div>
+
+    <div id="signinForm" class="auth-view">
+      <form onsubmit="handleSignIn(event)">
+        <div class="auth-field"><label>Username</label><input type="text" id="signinUsername" required placeholder="Enter username"></div>
+        <div class="auth-field"><label>Password</label><input type="password" id="signinPassword" required placeholder="Password"></div>
+        <button type="submit" class="auth-btn">Sign In</button>
+      </form>
+    </div>
+
+    <div id="signupForm" class="auth-view auth-hidden">
+      <form onsubmit="handleSignUp(event)">
+        <div class="auth-field"><label>Username</label><input type="text" id="signupUsername" required placeholder="Choose a username"></div>
+        <div class="auth-field"><label>Password</label><input type="password" id="signupPassword" required placeholder="Create a password" minlength="6"></div>
+        <div class="auth-field"><label>Confirm Password</label><input type="password" id="signupConfirm" required placeholder="Confirm password"></div>
+        <button type="submit" class="auth-btn">Sign Up</button>
+      </form>
+    </div>
+
+    <div id="signedInView" class="auth-view auth-hidden">
+      <div class="account-email">Playing as <span id="signedInUser"></span></div>
+      <div class="account-actions">
+        <button class="account-btn" id="changePassToggle" onclick="toggleChangePass()">Change Password</button>
+        <div class="change-pass-wrap" id="changePassWrap">
+          <form class="change-pass-form" onsubmit="handleChangePassword(event)">
+            <div class="auth-field"><label>Current Password</label><input type="password" id="currPassword" required placeholder="Current password"></div>
+            <div class="auth-field"><label>New Password</label><input type="password" id="newPassword" required placeholder="New password" minlength="6"></div>
+            <div class="auth-field"><label>Confirm New Password</label><input type="password" id="confirmNewPassword" required placeholder="Confirm new password"></div>
+            <button type="submit" class="auth-btn">Update Password</button>
+          </form>
+        </div>
+        <button class="account-btn signout" id="signoutBtn" onclick="handleSignOut()">Sign Out</button>
+      </div>
+    </div>
+
+    <div id="authMsg" class="auth-msg"></div>
+  </div>
+</div>
+
+<script>
+const panel=document.getElementById("panel");
+const advancedPanel=document.getElementById("advancedPanel");
+const counter=document.getElementById("counter");
+const timer=document.getElementById("timer");
+const watermark=document.getElementById("watermark");
+const fontList=document.getElementById("fontList");
+const colorGrid=document.getElementById("colorGrid");
+const versionPopup=document.getElementById("versionPopup");
+const advancedBtn=document.getElementById("advancedBtn");
+const colorWheelCanvas=document.getElementById("colorWheel");
+const ctx=colorWheelCanvas.getContext("2d");
+const authOverlay=document.getElementById("authOverlay");
+const authMsg=document.getElementById("authMsg");
+
+// Clear old accounts — fresh start with username system
+localStorage.removeItem("counterAccounts");
+localStorage.removeItem("counterAuthUser");
+let currentUser=null;
+let userAccounts={};
+let currentAuthView="signin";
+
+function showAuthMsg(text,type=""){authMsg.textContent=text;authMsg.className="auth-msg"+(type?" "+type:"")}
+
+function switchAuthTab(tab){
+  const views={signin:"signinForm",signup:"signupForm"};
+  const fromId=views[currentAuthView],toId=views[tab];
+  if(fromId===toId){showAuthMsg("");return}
+  if(fromId){const el=document.getElementById(fromId);if(el){el.classList.remove("slide-in");el.classList.add("slide-out-left");setTimeout(()=>{el.classList.add("auth-hidden");el.classList.remove("slide-out-left")},280)}}
+  document.querySelectorAll(".auth-tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===tab));
+  document.getElementById("authTitle").textContent=tab==="signin"?"Sign In":"Sign Up";
+  const toEl=document.getElementById(toId);if(toEl){toEl.classList.remove("auth-hidden");toEl.classList.add("slide-in")}
+  showAuthMsg("");currentAuthView=tab;
+}
+
+function showSignedInView(email){
+  ["signinForm","signupForm"].forEach(id=>{const el=document.getElementById(id);if(el)el.classList.add("auth-hidden")});
+  document.getElementById("authTabs").style.display="none";
+  document.getElementById("authTitle").textContent="Account";
+  document.getElementById("signedInUser").textContent=email;
+  const sv=document.getElementById("signedInView");sv.classList.remove("auth-hidden");sv.classList.add("slide-in");
+  showAuthMsg("");currentAuthView="signedin";
+}
+
+function showAuthForms(){
+  const sv=document.getElementById("signedInView");sv.classList.add("auth-hidden");sv.classList.remove("slide-in");
+  document.getElementById("authTabs").style.display="";
+  switchAuthTab("signin");currentAuthView="signin";
+}
+
+function handleSignUp(e){
+  e.preventDefault();
+  const username=document.getElementById("signupUsername").value.trim();
+  const pass=document.getElementById("signupPassword").value;
+  const confirm=document.getElementById("signupConfirm").value;
+  if(!username){showAuthMsg("Username is required","error");return}
+  if(pass!==confirm){showAuthMsg("Passwords do not match","error");return}
+  if(pass.length<6){showAuthMsg("Password must be at least 6 characters","error");return}
+  if(userAccounts[username]){showAuthMsg("Username already taken","error");return}
+  userAccounts[username]={password:pass,prefs:{}};
+  localStorage.setItem("counterAccounts",JSON.stringify(userAccounts));
+  currentUser=username;localStorage.setItem("counterAuthUser",username);
+  showAuthMsg("Account created!","success");
+  setTimeout(()=>{authOverlay.classList.remove("active");loadUserPrefs()},800);
+}
+
+function handleSignIn(e){
+  e.preventDefault();
+  const username=document.getElementById("signinUsername").value.trim();
+  const pass=document.getElementById("signinPassword").value;
+  if(!userAccounts[username]){showAuthMsg("No account found with this username","error");return}
+  if(userAccounts[username].password!==pass){showAuthMsg("Incorrect password","error");return}
+  currentUser=username;localStorage.setItem("counterAuthUser",username);
+  showAuthMsg("Signed in!","success");
+  setTimeout(()=>{authOverlay.classList.remove("active");loadUserPrefs()},800);
+}
+
+function toggleChangePass(){
+  const wrap=document.getElementById("changePassWrap");
+  const btn=document.getElementById("changePassToggle");
+  wrap.classList.toggle("open");
+  btn.textContent=wrap.classList.contains("open")?"Cancel":"Change Password";
+  if(!wrap.classList.contains("open")){document.getElementById("currPassword").value="";document.getElementById("newPassword").value="";document.getElementById("confirmNewPassword").value="";showAuthMsg("")}
+}
+
+function handleChangePassword(e){
+  e.preventDefault();
+  const curr=document.getElementById("currPassword").value;
+  const newPass=document.getElementById("newPassword").value;
+  const confirm=document.getElementById("confirmNewPassword").value;
+  if(userAccounts[currentUser].password!==curr){showAuthMsg("Current password is incorrect","error");return}
+  if(newPass.length<6){showAuthMsg("New password must be at least 6 characters","error");return}
+  if(newPass!==confirm){showAuthMsg("New passwords do not match","error");return}
+  if(newPass===curr){showAuthMsg("New password must be different","error");return}
+  userAccounts[currentUser].password=newPass;
+  localStorage.setItem("counterAccounts",JSON.stringify(userAccounts));
+  document.getElementById("currPassword").value="";
+  document.getElementById("newPassword").value="";
+  document.getElementById("confirmNewPassword").value="";
+  showAuthMsg("Password updated!","success");
+}
+
+function handleSignOut(){
+  const btn=document.getElementById("signoutBtn");
+  btn.classList.add("signing-out");
+  setTimeout(()=>{
+    saveCurrentPrefs();currentUser=null;
+    localStorage.removeItem("counterAuthUser");
+    showAuthForms();authOverlay.classList.add("active");
+    btn.classList.remove("signing-out");
+  },400);
+}
+
+let prefs=JSON.parse(localStorage.getItem("counterPrefs")||'{"font":"Arial","color":"#ffffff"}');
+function loadUserPrefs(){if(currentUser&&userAccounts[currentUser]&&userAccounts[currentUser].prefs){const u=userAccounts[currentUser].prefs;if(u.font)prefs.font=u.font;if(u.color)prefs.color=u.color}applyPrefs()}
+function saveCurrentPrefs(){if(currentUser&&userAccounts[currentUser]){userAccounts[currentUser].prefs={font:prefs.font,color:prefs.color};localStorage.setItem("counterAccounts",JSON.stringify(userAccounts))}}
+function applyPrefs(){document.body.style.fontFamily=prefs.font;document.body.style.color=prefs.color;localStorage.setItem("counterPrefs",JSON.stringify(prefs))}
+applyPrefs();
+
+const fonts=["Arial","Verdana","Tahoma","Georgia","Courier New","Times New Roman","Impact","Comic Sans MS"];
+fonts.forEach(f=>{const d=document.createElement("div");d.className="font-option";d.textContent=f;d.style.fontFamily=f;d.onclick=()=>{prefs.font=f;applyPrefs();saveCurrentPrefs()};fontList.appendChild(d)});
+
+const colors=["#ffffff","#4da6ff","#ff9966","#ffd24d","#ff4d6d","#66ff99","#b366ff","#00e5ff"];
+colors.forEach(c=>{const d=document.createElement("div");d.className="color";d.style.background=c;d.onclick=()=>{prefs.color=c;applyPrefs();saveCurrentPrefs()};colorGrid.appendChild(d)});
+
+let start=Date.now();
+function updateTimer(){const ms=Date.now()-start;counter.textContent=ms.toLocaleString();const h=Math.floor(ms/3600000),m=Math.floor(ms%3600000/60000),s=Math.floor(ms%60000/1000);timer.textContent=`${h}:${m.toString().padStart(2,"0")}:${s.toString().padStart(2,"0")}`;requestAnimationFrame(updateTimer)}
+updateTimer();
+
+let selected=null;
+function setupObject(el,isCenter=false,horizontalOnly=false,noRotation=false){
+  let x=0,y=0,targetX=0,targetY=0,rotation=0,targetRotation=0;
+  el._state={x:()=>x,y:()=>y,get targetRotation(){return targetRotation},set targetRotation(v){targetRotation=v},noRotation};
+  el.addEventListener("click",()=>{
+    if(!panel.classList.contains("active")&&!advancedPanel.classList.contains("active"))return;
+    if(selected===el){el.classList.remove("selected");selected=null;return}
+    document.querySelectorAll(".selected").forEach(e=>e.classList.remove("selected"));selected=el;el.classList.add("selected")
+  });
+  function clamp(){const r=el.getBoundingClientRect();if(horizontalOnly){if(r.left<0)targetX-=r.left;if(r.right>window.innerWidth)targetX-=r.right-window.innerWidth;targetY=0}else{if(r.left<0)targetX-=r.left;if(r.right>window.innerWidth)targetX-=r.right-window.innerWidth;if(r.top<0)targetY-=r.top;if(r.bottom>window.innerHeight)targetY-=r.bottom-window.innerHeight}}
+  function animate(){clamp();x+=(targetX-x)*0.12;y+=(targetY-y)*0.12;rotation+=(targetRotation-rotation)*0.10;el.style.transform=isCenter?`translate(-50%,-50%) translate(${x}px,${y}px) rotate(${rotation}deg)`:`translate(${x}px,${y}px) rotate(${rotation}deg)`;requestAnimationFrame(animate)}
+  animate();
+  window.addEventListener("keydown",e=>{if(selected!==el)return;if(!panel.classList.contains("active")&&!advancedPanel.classList.contains("active"))return;switch(e.key.toLowerCase()){case"w":case"arrowup":if(!horizontalOnly)targetY-=40;break;case"s":case"arrowdown":if(!horizontalOnly)targetY+=40;break;case"a":case"arrowleft":targetX-=40;break;case"d":case"arrowright":targetX+=40;break}});
+  window.addEventListener("resize",clamp);
+}
+setupObject(counter,true,false);setupObject(timer,false,false);setupObject(watermark,false,true,true);
+
+// J/L rotation for selected object — J=CCW, L=CW, ±90° max
+window.addEventListener("keydown",e=>{
+  const k=e.key.toLowerCase();
+  if((k==="j"||k==="l")&&selected&&selected._state&&!selected._state.noRotation){
+    selected._state.targetRotation=Math.max(-90,Math.min(90,selected._state.targetRotation+(k==="j"?10:-10)));
+  }
+});
+
+window.addEventListener("keydown",e=>{if(e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==="u"){panel.classList.toggle("active");advancedPanel.classList.remove("active");selected=null;document.querySelectorAll(".selected").forEach(e=>e.classList.remove("selected"))}});
+window.addEventListener("keydown",e=>{if(e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==="l"){e.preventDefault();if(authOverlay.classList.contains("active")){authOverlay.classList.remove("active")}else{if(currentUser)showSignedInView(currentUser);else showAuthForms();authOverlay.classList.add("active")}}});
+window.addEventListener("keydown",e=>{if(e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==="v"){versionPopup.classList.add("show");setTimeout(()=>versionPopup.classList.remove("show"),3000)}});
+advancedBtn.addEventListener("click",()=>{advancedPanel.classList.toggle("active")});
+
+function drawColorWheel(){const w=colorWheelCanvas.width=colorWheelCanvas.offsetWidth;const h=colorWheelCanvas.height=colorWheelCanvas.offsetHeight;const image=ctx.createImageData(w,h);const cx=w/2,cy=h/2,radius=Math.min(w,h)/2;for(let y=0;y<h;y++){for(let x=0;x<w;x++){const dx=x-cx,dy=y-cy,d=Math.sqrt(dx*dx+dy*dy);const idx=(y*w+x)*4;if(d<=radius){let angle=Math.atan2(dy,dx);if(angle<0)angle+=2*Math.PI;let hue=angle/6.283185307179586,sat=d/radius,val=1;const rgb=hsvToRgb(hue,sat,val);image.data[idx]=rgb[0];image.data[idx+1]=rgb[1];image.data[idx+2]=rgb[2];image.data[idx+3]=255}else{image.data[idx+3]=0}}}ctx.putImageData(image,0,0)}
+function hsvToRgb(h,s,v){let r,g,b,i=Math.floor(h*6),f=h*6-i,p=v*(1-s),q=v*(1-f*s),t=v*(1-(1-f)*s);switch(i%6){case 0:r=v,g=t,b=p;break;case 1:r=q,g=v,b=p;break;case 2:r=p,g=v,b=t;break;case 3:r=p,g=q,b=v;break;case 4:r=t,g=p,b=v;break;case 5:r=v,g=p,b=q;break}return[Math.round(r*255),Math.round(g*255),Math.round(b*255)]}
+function pickColor(e){const rect=colorWheelCanvas.getBoundingClientRect();const x=e.clientX-rect.left,y=e.clientY-rect.top;const px=Math.floor(x),py=Math.floor(y);const data=ctx.getImageData(px,py,1,1).data;if(data[3]>0){prefs.color=`rgb(${data[0]},${data[1]},${data[2]})`;applyPrefs();saveCurrentPrefs()}}
+drawColorWheel();let dragging=false;colorWheelCanvas.addEventListener("mousedown",e=>{dragging=true;pickColor(e)});window.addEventListener("mouseup",()=>dragging=false);colorWheelCanvas.addEventListener("mousemove",e=>{if(dragging)pickColor(e)});window.addEventListener("resize",drawColorWheel);
+
+if(currentUser)loadUserPrefs();
+</script>
+</body>
+</html>
