@@ -137,7 +137,22 @@ button:hover{background:rgba(255,255,255,.25)}
   </div>
 </div>
 
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
+const firebaseConfig={
+  apiKey:"AIzaSyBesgnQfvIrgj2Ewn4X0A0qvFnmaZbQ3Lc",
+  authDomain:"counter-2ca08.firebaseapp.com",
+  projectId:"counter-2ca08",
+  storageBucket:"counter-2ca08.firebasestorage.app",
+  messagingSenderId:"513934053456",
+  appId:"1:513934053456:web:75b9cb3142050d88690155"
+};
+firebase.initializeApp(firebaseConfig);
+const auth=firebase.auth();
+const db=firebase.firestore();
+
 const panel=document.getElementById("panel");
 const advancedPanel=document.getElementById("advancedPanel");
 const counter=document.getElementById("counter");
@@ -152,11 +167,7 @@ const ctx=colorWheelCanvas.getContext("2d");
 const authOverlay=document.getElementById("authOverlay");
 const authMsg=document.getElementById("authMsg");
 
-// Clear old accounts — fresh start with username system
-localStorage.removeItem("counterAccounts");
-localStorage.removeItem("counterAuthUser");
 let currentUser=null;
-let userAccounts={};
 let currentAuthView="signin";
 
 function showAuthMsg(text,type=""){authMsg.textContent=text;authMsg.className="auth-msg"+(type?" "+type:"")}
@@ -187,7 +198,32 @@ function showAuthForms(){
   switchAuthTab("signin");currentAuthView="signin";
 }
 
-function handleSignUp(e){
+// Auth state listener — persists session across page loads
+auth.onAuthStateChanged(async(user)=>{
+  if(user){
+    currentUser=user.email;
+    showSignedInView(user.email);
+    authOverlay.classList.remove("active");
+    // Load prefs from Firestore
+    try{
+      const doc=await db.collection("users").doc(user.uid).get();
+      if(doc.exists&&doc.data().prefs){
+        const p=doc.data().prefs;
+        if(p.font)prefs.font=p.font;
+        if(p.color)prefs.color=p.color;
+        applyPrefs();
+      }
+    }catch(e){/* first login — no prefs yet */}
+  }else{
+    currentUser=null;
+  }
+});
+
+function emailFromUsername(username){
+  return username.replace(/[^a-zA-Z0-9]/g,"_")+"@counter.app";
+}
+
+async function handleSignUp(e){
   e.preventDefault();
   const username=document.getElementById("signupUsername").value.trim();
   const pass=document.getElementById("signupPassword").value;
@@ -195,23 +231,36 @@ function handleSignUp(e){
   if(!username){showAuthMsg("Username is required","error");return}
   if(pass!==confirm){showAuthMsg("Passwords do not match","error");return}
   if(pass.length<6){showAuthMsg("Password must be at least 6 characters","error");return}
-  if(userAccounts[username]){showAuthMsg("Username already taken","error");return}
-  userAccounts[username]={password:pass,prefs:{}};
-  localStorage.setItem("counterAccounts",JSON.stringify(userAccounts));
-  currentUser=username;localStorage.setItem("counterAuthUser",username);
-  showAuthMsg("Account created!","success");
-  setTimeout(()=>{authOverlay.classList.remove("active");loadUserPrefs()},800);
+  const email=emailFromUsername(username);
+  try{
+    const cred=await auth.createUserWithEmailAndPassword(email,pass);
+    // Save username + prefs in Firestore
+    await db.collection("users").doc(cred.user.uid).set({
+      username,
+      prefs:{font:prefs.font,color:prefs.color}
+    });
+    showAuthMsg("Account created!","success");
+    setTimeout(()=>{authOverlay.classList.remove("active")},800);
+  }catch(err){
+    if(err.code==="auth/email-already-in-use")showAuthMsg("Username already taken","error");
+    else if(err.code==="auth/weak-password")showAuthMsg("Password too weak (min 6 chars)","error");
+    else showAuthMsg(err.message,"error");
+  }
 }
 
-function handleSignIn(e){
+async function handleSignIn(e){
   e.preventDefault();
   const username=document.getElementById("signinUsername").value.trim();
   const pass=document.getElementById("signinPassword").value;
-  if(!userAccounts[username]){showAuthMsg("No account found with this username","error");return}
-  if(userAccounts[username].password!==pass){showAuthMsg("Incorrect password","error");return}
-  currentUser=username;localStorage.setItem("counterAuthUser",username);
-  showAuthMsg("Signed in!","success");
-  setTimeout(()=>{authOverlay.classList.remove("active");loadUserPrefs()},800);
+  const email=emailFromUsername(username);
+  try{
+    await auth.signInWithEmailAndPassword(email,pass);
+    showAuthMsg("Signed in!","success");
+  }catch(err){
+    if(err.code==="auth/user-not-found")showAuthMsg("No account found with this username","error");
+    else if(err.code==="auth/wrong-password")showAuthMsg("Incorrect password","error");
+    else showAuthMsg(err.message,"error");
+  }
 }
 
 function toggleChangePass(){
@@ -222,38 +271,52 @@ function toggleChangePass(){
   if(!wrap.classList.contains("open")){document.getElementById("currPassword").value="";document.getElementById("newPassword").value="";document.getElementById("confirmNewPassword").value="";showAuthMsg("")}
 }
 
-function handleChangePassword(e){
+async function handleChangePassword(e){
   e.preventDefault();
   const curr=document.getElementById("currPassword").value;
   const newPass=document.getElementById("newPassword").value;
   const confirm=document.getElementById("confirmNewPassword").value;
-  if(userAccounts[currentUser].password!==curr){showAuthMsg("Current password is incorrect","error");return}
   if(newPass.length<6){showAuthMsg("New password must be at least 6 characters","error");return}
   if(newPass!==confirm){showAuthMsg("New passwords do not match","error");return}
-  if(newPass===curr){showAuthMsg("New password must be different","error");return}
-  userAccounts[currentUser].password=newPass;
-  localStorage.setItem("counterAccounts",JSON.stringify(userAccounts));
-  document.getElementById("currPassword").value="";
-  document.getElementById("newPassword").value="";
-  document.getElementById("confirmNewPassword").value="";
-  showAuthMsg("Password updated!","success");
+  try{
+    const user=auth.currentUser;
+    // Re-auth with current password first
+    const cred=firebase.auth.EmailAuthProvider.credential(user.email,curr);
+    await user.reauthenticateWithCredential(cred);
+    await user.updatePassword(newPass);
+    document.getElementById("currPassword").value="";
+    document.getElementById("newPassword").value="";
+    document.getElementById("confirmNewPassword").value="";
+    showAuthMsg("Password updated!","success");
+  }catch(err){
+    if(err.code==="auth/wrong-password")showAuthMsg("Current password is incorrect","error");
+    else if(err.code==="auth/too-many-requests")showAuthMsg("Too many attempts — try again later","error");
+    else showAuthMsg(err.message,"error");
+  }
 }
 
 function handleSignOut(){
   const btn=document.getElementById("signoutBtn");
   btn.classList.add("signing-out");
-  setTimeout(()=>{
-    saveCurrentPrefs();currentUser=null;
-    localStorage.removeItem("counterAuthUser");
-    showAuthForms();authOverlay.classList.add("active");
+  setTimeout(async()=>{
+    await saveCurrentPrefs();
+    await auth.signOut();
+    showAuthForms();
+    authOverlay.classList.add("active");
     btn.classList.remove("signing-out");
   },400);
 }
 
 let prefs=JSON.parse(localStorage.getItem("counterPrefs")||'{"font":"Arial","color":"#ffffff"}');
-function loadUserPrefs(){if(currentUser&&userAccounts[currentUser]&&userAccounts[currentUser].prefs){const u=userAccounts[currentUser].prefs;if(u.font)prefs.font=u.font;if(u.color)prefs.color=u.color}applyPrefs()}
-function saveCurrentPrefs(){if(currentUser&&userAccounts[currentUser]){userAccounts[currentUser].prefs={font:prefs.font,color:prefs.color};localStorage.setItem("counterAccounts",JSON.stringify(userAccounts))}}
 function applyPrefs(){document.body.style.fontFamily=prefs.font;document.body.style.color=prefs.color;localStorage.setItem("counterPrefs",JSON.stringify(prefs))}
+async function saveCurrentPrefs(){
+  if(!auth.currentUser)return;
+  try{
+    await db.collection("users").doc(auth.currentUser.uid).set({
+      prefs:{font:prefs.font,color:prefs.color}
+    });
+  }catch(e){/* offline — keep local */}
+}
 applyPrefs();
 
 const fonts=["Arial","Verdana","Tahoma","Georgia","Courier New","Times New Roman","Impact","Comic Sans MS"];
@@ -292,7 +355,7 @@ window.addEventListener("keydown",e=>{
 });
 
 window.addEventListener("keydown",e=>{if(e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==="u"){panel.classList.toggle("active");advancedPanel.classList.remove("active");selected=null;document.querySelectorAll(".selected").forEach(e=>e.classList.remove("selected"))}});
-window.addEventListener("keydown",e=>{if(e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==="l"){e.preventDefault();if(authOverlay.classList.contains("active")){authOverlay.classList.remove("active")}else{if(currentUser)showSignedInView(currentUser);else showAuthForms();authOverlay.classList.add("active")}}});
+window.addEventListener("keydown",e=>{if(e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==="l"){e.preventDefault();if(authOverlay.classList.contains("active")){authOverlay.classList.remove("active")}else{if(auth.currentUser)showSignedInView(auth.currentUser.email);else showAuthForms();authOverlay.classList.add("active")}}});
 window.addEventListener("keydown",e=>{if(e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==="v"){versionPopup.classList.add("show");setTimeout(()=>versionPopup.classList.remove("show"),3000)}});
 advancedBtn.addEventListener("click",()=>{advancedPanel.classList.toggle("active")});
 
