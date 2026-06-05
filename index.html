@@ -144,7 +144,7 @@ button:hover{background:rgba(255,255,255,.25)}
 <script type="module">
 import{initializeApp}from"https://www.gstatic.com/firebasejs/12.14.0/firebase-app.js";
 import{getAuth,onAuthStateChanged,createUserWithEmailAndPassword,signInWithEmailAndPassword,signOut,EmailAuthProvider,reauthenticateWithCredential,updatePassword,setPersistence,browserLocalPersistence}from"https://www.gstatic.com/firebasejs/12.14.0/firebase-auth.js";
-import{getFirestore,doc,getDoc,setDoc,onSnapshot,updateDoc,deleteDoc,collection,query,where,getDocs,serverTimestamp}from"https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
+import{getFirestore,doc,getDoc,setDoc,onSnapshot,deleteDoc,collection,query,getDocs,serverTimestamp}from"https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
 
 const firebaseConfig={apiKey:"AIzaSyBesgnQfvIrgj2Ewn4X0A0qvFnmaZbQ3Lc",authDomain:"counter-2ca08.firebaseapp.com",projectId:"counter-2ca08",storageBucket:"counter-2ca08.firebasestorage.app",messagingSenderId:"513934053456",appId:"1:513934053456:web:75b9cb3142050d88690155",measurementId:"G-BEQJ0TWES5"};
 const app=initializeApp(firebaseConfig);
@@ -167,16 +167,14 @@ async function registerDevice(uid){
   const deviceDoc=doc(devicesRef,DEVICE_ID);
   const snap=await getDoc(deviceDoc);
   if(!snap.exists()){
-    const q=query(devicesRef);
-    const all=await getDocs(q);
+    const all=await getDocs(devicesRef);
     if(all.size>=MAX_DEVICES){
-      // Remove oldest device
       const sorted=all.docs.sort((a,b)=>{
         const ta=a.data().lastSeen?.toMillis?.()||0;
         const tb=b.data().lastSeen?.toMillis?.()||0;
         return ta-tb;
       });
-      for(let i=0;i<sorted.length-MAX_DEVICES+1;i++){
+      for(let i=0;i<=sorted.length-MAX_DEVICES;i++){
         await deleteDoc(doc(devicesRef,sorted[i].id));
       }
     }
@@ -185,27 +183,17 @@ async function registerDevice(uid){
 }
 
 async function unregisterDevice(uid){
-  try{
-    await deleteDoc(doc(db,"users",uid,"devices",DEVICE_ID));
-  }catch(e){}
-}
-
-async function getActiveDeviceCount(uid){
-  try{
-    const snap=await getDocs(collection(db,"users",uid,"devices"));
-    return snap.size;
-  }catch(e){return 0;}
+  try{await deleteDoc(doc(db,"users",uid,"devices",DEVICE_ID));}catch(e){}
 }
 
 function updateDeviceIndicator(count){
   const el=document.getElementById("deviceIndicator");
   if(!el)return;
-  if(count>1)el.textContent=`${count} devices active`;
-  else el.textContent="";
+  el.textContent=count>1?count+" devices active":"";
 }
 
 // ═══════════════════════════════════════
-// PREFS SYSTEM — includes positions + rotation
+// PREFS — single source of truth for all UI state
 // ═══════════════════════════════════════
 const DEFAULT_PREFS={
   font:"Arial",color:"#ffffff",
@@ -216,6 +204,9 @@ const DEFAULT_PREFS={
 
 let prefs=JSON.parse(localStorage.getItem("counterPrefs")||"{}");
 prefs={...DEFAULT_PREFS,...prefs};
+
+// Track whether a prefs update came from Firestore (remote) or local
+let applyingRemote=false;
 
 const FONTS=["Arial","Verdana","Tahoma","Georgia","Courier New","Times New Roman","Impact","Comic Sans MS"];
 const COLORS=["#ffffff","#4da6ff","#ff9966","#ffd24d","#ff4d6d","#66ff99","#b366ff","#00e5ff"];
@@ -233,19 +224,17 @@ COLORS.forEach(c=>{
   document.getElementById("colorGrid").appendChild(d);
 });
 
-// Debounced Firestore write — fires 300ms after last change
+// Debounced Firestore write
 let saveTimeout=null;
 function saveToFirestore(){
   if(!auth.currentUser)return;
+  if(applyingRemote)return; // don't echo remote changes back
   clearTimeout(saveTimeout);
   saveTimeout=setTimeout(()=>{
     const data={};
-    // Only sync these keys to Firestore
-    ["font","color","counterX","counterY","counterRot","timerX","timerY","timerRot","watermarkX","watermarkY"].forEach(k=>{
-      data[k]=prefs[k];
-    });
+    ["font","color","counterX","counterY","counterRot","timerX","timerY","timerRot","watermarkX","watermarkY"].forEach(k=>data[k]=prefs[k]);
     setDoc(doc(db,"users",auth.currentUser.uid),{prefs:data},{merge:true}).catch(()=>{});
-  },300);
+  },200);
 }
 
 function changePref(key,val){
@@ -259,17 +248,31 @@ function applyPrefs(){
   document.body.style.fontFamily=prefs.font;
   document.body.style.color=prefs.color;
   localStorage.setItem("counterPrefs",JSON.stringify(prefs));
+
+  // Update font option highlights
   document.querySelectorAll(".font-option").forEach(el=>{
     const on=el.dataset.font===prefs.font;
     el.style.outline=on?"2px solid #ffe066":"none";
     el.style.background=on?"rgba(255,224,102,.15)":"rgba(255,255,255,.05)";
   });
+  // Update color swatch highlights
   document.querySelectorAll(".color").forEach(el=>{
     const on=el.dataset.color&&el.dataset.color.toLowerCase()===prefs.color.toLowerCase();
     el.style.outline=on?"2px solid #ffe066":"none";
     el.style.boxShadow=on?"0 0 12px rgba(255,224,102,.6)":"none";
   });
+
+  // If this is a remote update, also push new targets to the draggable objects
+  if(applyingRemote){
+    draggables.forEach(d=>{
+      const pk=d.prefKey;
+      if(prefs[pk+"X"]!==undefined)d.tx=prefs[pk+"X"];
+      if(prefs[pk+"Y"]!==undefined)d.ty=prefs[pk+"Y"];
+      if(prefs[pk+"Rot"]!==undefined)d.trot=prefs[pk+"Rot"];
+    });
+  }
 }
+
 applyPrefs();
 
 // ═══════════════════════════════════════
@@ -277,7 +280,7 @@ applyPrefs();
 // ═══════════════════════════════════════
 let lastKnownUsername="";
 let prefsUnsub=null;
-let isSigningOut=false;  // <-- critical flag to prevent onAuthStateChanged from re-showing account
+let signedIn=false; // tracks whether WE are signed in (not Firebase's async state)
 
 function showMsg(text,type){
   const el=document.getElementById("authMsg");
@@ -312,33 +315,42 @@ function showAccount(name){
 
 function showLoginForms(){
   document.getElementById("signedInView").classList.add("auth-hidden");
+  document.getElementById("signedInView").classList.remove("slide-in");
   document.getElementById("authTabs").style.display="";
   switchTab("signin");
 }
 
 function toEmail(u){return u.replace(/[^a-zA-Z0-9]/g,"_")+"@counter.app"}
 
-// Auth state
 onAuthStateChanged(auth,async user=>{
-  // If we're in the middle of signing out, ignore everything
-  if(isSigningOut)return;
-
   if(prefsUnsub){prefsUnsub();prefsUnsub=null;}
 
   if(!user){
-    // User signed out — show login
-    showLoginForms();
-    document.getElementById("authOverlay").classList.add("active");
-    // Reset to defaults
-    prefs={...DEFAULT_PREFS};
-    applyPrefs();
+    // Only show login overlay if we were previously signed in or on first load
+    if(signedIn){
+      // We got signed out — show login
+      signedIn=false;
+      showLoginForms();
+      document.getElementById("authOverlay").classList.add("active");
+      prefs={...DEFAULT_PREFS};
+      applyPrefs();
+    }else{
+      // First load, not signed in — just show login
+      showLoginForms();
+      document.getElementById("authOverlay").classList.add("active");
+    }
     return;
   }
 
-  // User signed in
+  // User is signed in
+  signedIn=true;
   await registerDevice(user.uid);
-  const deviceCount=await getActiveDeviceCount(user.uid);
-  updateDeviceIndicator(deviceCount);
+
+  // Count active devices
+  try{
+    const all=await getDocs(collection(db,"users",user.uid,"devices"));
+    updateDeviceIndicator(all.size);
+  }catch(e){}
 
   const ref=doc(db,"users",user.uid);
   try{
@@ -348,15 +360,12 @@ onAuthStateChanged(auth,async user=>{
       showAccount(d.username||user.email);
       document.getElementById("authOverlay").classList.remove("active");
       if(d.prefs){
-        // Merge server prefs — server wins for shared state
-        let changed=false;
+        applyingRemote=true;
         Object.keys(d.prefs).forEach(k=>{
-          if(d.prefs[k]!==undefined&&d.prefs[k]!==prefs[k]){
-            prefs[k]=d.prefs[k];
-            changed=true;
-          }
+          if(d.prefs[k]!==undefined)prefs[k]=d.prefs[k];
         });
-        if(changed)applyPrefs();
+        applyPrefs();
+        applyingRemote=false;
       }
     }else{
       showAccount(user.email);
@@ -367,11 +376,12 @@ onAuthStateChanged(auth,async user=>{
     document.getElementById("authOverlay").classList.remove("active");
   }
 
-  // Real-time sync — listens for changes from OTHER devices
+  // Real-time sync from other devices
   prefsUnsub=onSnapshot(ref,snap=>{
     if(!snap.exists())return;
     const d=snap.data();
     if(!d.prefs)return;
+    applyingRemote=true;
     let changed=false;
     Object.keys(d.prefs).forEach(k=>{
       if(d.prefs[k]!==undefined&&d.prefs[k]!==prefs[k]){
@@ -380,6 +390,7 @@ onAuthStateChanged(auth,async user=>{
       }
     });
     if(changed)applyPrefs();
+    applyingRemote=false;
   },()=>{});
 });
 
@@ -461,39 +472,32 @@ document.getElementById("changePassForm").onsubmit=async function(e){
 };
 
 document.getElementById("signoutBtn").onclick=async function(){
-  // Set flag BEFORE anything else — prevents onAuthStateChanged from fighting us
-  isSigningOut=true;
-
   this.classList.add("signing-out");
 
-  // Save current prefs before signing out
+  // Save prefs before signing out
   if(auth.currentUser){
     const data={};
-    ["font","color","counterX","counterY","counterRot","timerX","timerY","timerRot","watermarkX","watermarkY"].forEach(k=>{
-      data[k]=prefs[k];
-    });
+    ["font","color","counterX","counterY","counterRot","timerX","timerY","timerRot","watermarkX","watermarkY"].forEach(k=>data[k]=prefs[k]);
     await setDoc(doc(db,"users",auth.currentUser.uid),{prefs:data},{merge:true}).catch(()=>{});
     await unregisterDevice(auth.currentUser.uid);
   }
 
+  // Stop listening to Firestore BEFORE signing out
   if(prefsUnsub){prefsUnsub();prefsUnsub=null;}
 
+  signedIn=false;
   await signOut(auth);
 
-  // Reset to defaults
+  // Reset UI — onAuthStateChanged won't fight us because signedIn=false
+  // and we already unsubscribed
   prefs={...DEFAULT_PREFS};
   applyPrefs();
-
-  // Show login UI
   showLoginForms();
   document.getElementById("authOverlay").classList.add("active");
   this.classList.remove("signing-out");
-
-  // Clear flag after a short delay — enough for Firebase to propagate
-  setTimeout(()=>{isSigningOut=false;},1000);
 };
 
-// Account panel toggle
+// Account panel toggle: Ctrl+Shift+L
 document.addEventListener("keydown",e=>{
   if(e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==="l"){
     e.preventDefault();
@@ -501,7 +505,7 @@ document.addEventListener("keydown",e=>{
     if(ov.classList.contains("active")){
       ov.classList.remove("active");
     }else{
-      if(auth.currentUser)showAccount(lastKnownUsername||auth.currentUser.email);
+      if(auth.currentUser&&signedIn)showAccount(lastKnownUsername||auth.currentUser.email);
       else showLoginForms();
       ov.classList.add("active");
     }
@@ -516,24 +520,26 @@ function updateTimer(){
   const ms=Date.now()-start;
   document.getElementById("counter").textContent=ms.toLocaleString();
   const h=Math.floor(ms/3600000),m=Math.floor(ms%3600000/60000),s=Math.floor(ms%60000/1000);
-  document.getElementById("timer").textContent=`${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+  document.getElementById("timer").textContent=h+":"+String(m).padStart(2,"0")+":"+String(s).padStart(2,"0");
   requestAnimationFrame(updateTimer);
 }
 updateTimer();
 
 // ═══════════════════════════════════════
-// DRAGGABLE OBJECTS — with Firestore sync
+// DRAGGABLE OBJECTS — single keydown handler, instant position restore
 // ═══════════════════════════════════════
 let selected=null;
+const draggables=[];
 
 function setupObject(el,prefKey,isCenter,horizontalOnly,noRotation){
-  // Restore saved position
+  // Restore saved position INSTANTLY — no lerp from zero
   let tx=prefs[prefKey+"X"]||0;
   let ty=prefs[prefKey+"Y"]||0;
   let trot=prefs[prefKey+"Rot"]||0;
-  let x=0,y=0,rot=0;
+  // Start visual position AT the target — no slide-in
+  let x=tx,y=ty,rot=trot;
 
-  el._state={get targetRotation(){return trot},set targetRotation(v){trot=v;},noRotation,_prefKey:prefKey};
+  el._state={get targetRotation(){return trot},set targetRotation(v){trot=v;},noRotation,prefKey};
 
   el.addEventListener("click",()=>{
     const p=document.getElementById("panel");
@@ -561,53 +567,59 @@ function setupObject(el,prefKey,isCenter,horizontalOnly,noRotation){
   function animate(){
     clamp();
     x+=(tx-x)*0.10;y+=(ty-y)*0.10;rot+=(trot-rot)*0.10;
-    el.style.transform=isCenter?`translate(-50%,-50%) translate(${x}px,${y}px) rotate(${rot}deg)`:`translate(${x}px,${y}px) rotate(${rot}deg)`;
+    el.style.transform=isCenter?"translate(-50%,-50%) translate("+x+"px,"+y+"px) rotate("+rot+"deg)":"translate("+x+"px,"+y+"px) rotate("+rot+"deg)";
     requestAnimationFrame(animate);
   }
   animate();
 
-  // Save position/rotation on every key move
-  window.addEventListener("keydown",e=>{
-    if(selected!==el)return;
-    const p=document.getElementById("panel");
-    const ap=document.getElementById("advancedPanel");
-    if(!p.classList.contains("active")&&!ap.classList.contains("active"))return;
-    const k=e.key.toLowerCase();
-    let moved=false;
-    if(k==="w"||k==="arrowup"){if(!horizontalOnly){ty-=40;moved=true;}}
-    else if(k==="s"||k==="arrowdown"){if(!horizontalOnly){ty+=40;moved=true;}}
-    else if(k==="a"||k==="arrowleft"){tx-=40;moved=true;}
-    else if(k==="d"||k==="arrowright"){tx+=40;moved=true;}
-
-    if(moved){
-      // Save to prefs immediately
-      prefs[prefKey+"X"]=tx;
-      prefs[prefKey+"Y"]=ty;
-      localStorage.setItem("counterPrefs",JSON.stringify(prefs));
-      saveToFirestore();
-    }
+  draggables.push({el,tx,ty,trot,prefKey,horizontalOnly,
+    get x(){return x},set x(v){x=v},
+    get y(){return y},set y(v){y=v},
+    get rot(){return rot},set rot(v){rot=v},
   });
-
-  window.addEventListener("resize",clamp);
 }
 
 setupObject(document.getElementById("counter"),"counter",true,false,false);
 setupObject(document.getElementById("timer"),"timer",false,false,false);
 setupObject(document.getElementById("watermark"),"watermark",false,true,true);
 
-// J/L rotation — also saves
+// SINGLE keydown handler for all draggables — no duplicates
 window.addEventListener("keydown",e=>{
+  if(!selected)return;
+  const d=draggables.find(d=>d.el===selected);
+  if(!d)return;
+
+  const p=document.getElementById("panel");
+  const ap=document.getElementById("advancedPanel");
+  if(!p.classList.contains("active")&&!ap.classList.contains("active"))return;
+
   const k=e.key.toLowerCase();
-  if((k==="j"||k==="l")&&selected&&selected._state&&!selected._state.noRotation){
-    selected._state.targetRotation=Math.max(-90,Math.min(90,selected._state.targetRotation+(k==="j"?10:-10)));
-    const key=selected._state._prefKey;
-    prefs[key+"Rot"]=selected._state.targetRotation;
+  let moved=false;
+
+  // Rotation with J/L
+  if((k==="j"||k==="l")&&!d.el._state.noRotation){
+    const newRot=Math.max(-90,Math.min(90,d.trot+(k==="j"?10:-10)));
+    d.trot=newRot;
+    d.el._state.targetRotation=newRot;
+    prefs[d.prefKey+"Rot"]=newRot;
+    moved=true;
+  }
+
+  // Movement with WASD/arrows
+  if(k==="w"||k==="arrowup"){if(!d.horizontalOnly){d.ty-=40;moved=true;}}
+  else if(k==="s"||k==="arrowdown"){if(!d.horizontalOnly){d.ty+=40;moved=true;}}
+  else if(k==="a"||k==="arrowleft"){d.tx-=40;moved=true;}
+  else if(k==="d"||k==="arrowright"){d.tx+=40;moved=true;}
+
+  if(moved){
+    prefs[d.prefKey+"X"]=d.tx;
+    prefs[d.prefKey+"Y"]=d.ty;
     localStorage.setItem("counterPrefs",JSON.stringify(prefs));
     saveToFirestore();
   }
 });
 
-// Panel toggle
+// Panel toggle: Ctrl+Shift+U
 window.addEventListener("keydown",e=>{
   if(e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==="u"){
     document.getElementById("panel").classList.toggle("active");
@@ -616,7 +628,7 @@ window.addEventListener("keydown",e=>{
   }
 });
 
-// Version popup
+// Version popup: Ctrl+Shift+V
 window.addEventListener("keydown",e=>{
   if(e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==="v"){
     const vp=document.getElementById("versionPopup");
@@ -642,8 +654,8 @@ function drawWheel(){
     const i=(y*w+x)*4;
     if(d<=r){
       let a=Math.atan2(dy,dx);if(a<0)a+=Math.PI*2;
-      const h=a/(Math.PI*2),s=d/r,v=1;
-      let R,G,B,ii=Math.floor(h*6),f=h*6-ii,p=v*(1-s),q=v*(1-f*s),t=v*(1-(1-f)*s);
+      const hh=a/(Math.PI*2),s=d/r,v=1;
+      let R,G,B,ii=Math.floor(hh*6),f=hh-ii,p=v*(1-s),q=v*(1-f*s),t=v*(1-(1-f)*s);
       switch(ii%6){case 0:R=v;G=t;B=p;break;case 1:R=q;G=v;B=p;break;case 2:R=p;G=v;B=t;break;case 3:R=p;G=q;B=v;break;case 4:R=t;G=p;B=v;break;case 5:R=v;G=p;B=q;break}
       img.data[i]=R*255;img.data[i+1]=G*255;img.data[i+2]=B*255;img.data[i+3]=255;
     }else{img.data[i+3]=0}
@@ -652,18 +664,4 @@ function drawWheel(){
 }
 
 function pickColor(e){
-  const rect=cw.getBoundingClientRect();
-  const x=Math.floor(e.clientX-rect.left),y=Math.floor(e.clientY-rect.top);
-  const d=cctx.getImageData(x,y,1,1).data;
-  if(d[3]>0)changePref("color",`rgb(${d[0]},${d[1]},${d[2]})`);
-}
-
-drawWheel();
-let dragging=false;
-cw.addEventListener("mousedown",e=>{dragging=true;pickColor(e)});
-window.addEventListener("mouseup",()=>dragging=false);
-cw.addEventListener("mousemove",e=>{if(dragging)pickColor(e)});
-window.addEventListener("resize",drawWheel);
-</script>
-</body>
-</html>
+  const rect=cw.getBoundingClient
