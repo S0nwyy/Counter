@@ -144,7 +144,7 @@ button:hover{background:rgba(255,255,255,.25)}
 <script type="module">
 import{initializeApp}from"https://www.gstatic.com/firebasejs/12.14.0/firebase-app.js";
 import{getAuth,onAuthStateChanged,createUserWithEmailAndPassword,signInWithEmailAndPassword,signOut,EmailAuthProvider,reauthenticateWithCredential,updatePassword,setPersistence,browserLocalPersistence}from"https://www.gstatic.com/firebasejs/12.14.0/firebase-auth.js";
-import{getFirestore,doc,getDoc,setDoc,onSnapshot,deleteDoc,collection,query,getDocs,serverTimestamp}from"https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
+import{getFirestore,doc,getDoc,setDoc,onSnapshot,deleteDoc,collection,getDocs,serverTimestamp}from"https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
 
 const firebaseConfig={apiKey:"AIzaSyBesgnQfvIrgj2Ewn4X0A0qvFnmaZbQ3Lc",authDomain:"counter-2ca08.firebaseapp.com",projectId:"counter-2ca08",storageBucket:"counter-2ca08.firebasestorage.app",messagingSenderId:"513934053456",appId:"1:513934053456:web:75b9cb3142050d88690155",measurementId:"G-BEQJ0TWES5"};
 const app=initializeApp(firebaseConfig);
@@ -193,7 +193,7 @@ function updateDeviceIndicator(count){
 }
 
 // ═══════════════════════════════════════
-// PREFS — single source of truth for all UI state
+// PREFS — single source of truth
 // ═══════════════════════════════════════
 const DEFAULT_PREFS={
   font:"Arial",color:"#ffffff",
@@ -205,7 +205,6 @@ const DEFAULT_PREFS={
 let prefs=JSON.parse(localStorage.getItem("counterPrefs")||"{}");
 prefs={...DEFAULT_PREFS,...prefs};
 
-// Track whether a prefs update came from Firestore (remote) or local
 let applyingRemote=false;
 
 const FONTS=["Arial","Verdana","Tahoma","Georgia","Courier New","Times New Roman","Impact","Comic Sans MS"];
@@ -224,11 +223,10 @@ COLORS.forEach(c=>{
   document.getElementById("colorGrid").appendChild(d);
 });
 
-// Debounced Firestore write
 let saveTimeout=null;
 function saveToFirestore(){
   if(!auth.currentUser)return;
-  if(applyingRemote)return; // don't echo remote changes back
+  if(applyingRemote)return;
   clearTimeout(saveTimeout);
   saveTimeout=setTimeout(()=>{
     const data={};
@@ -249,26 +247,24 @@ function applyPrefs(){
   document.body.style.color=prefs.color;
   localStorage.setItem("counterPrefs",JSON.stringify(prefs));
 
-  // Update font option highlights
   document.querySelectorAll(".font-option").forEach(el=>{
     const on=el.dataset.font===prefs.font;
     el.style.outline=on?"2px solid #ffe066":"none";
     el.style.background=on?"rgba(255,224,102,.15)":"rgba(255,255,255,.05)";
   });
-  // Update color swatch highlights
   document.querySelectorAll(".color").forEach(el=>{
     const on=el.dataset.color&&el.dataset.color.toLowerCase()===prefs.color.toLowerCase();
     el.style.outline=on?"2px solid #ffe066":"none";
     el.style.boxShadow=on?"0 0 12px rgba(255,224,102,.6)":"none";
   });
 
-  // If this is a remote update, also push new targets to the draggable objects
-  if(applyingRemote){
-    draggables.forEach(d=>{
-      const pk=d.prefKey;
-      if(prefs[pk+"X"]!==undefined)d.tx=prefs[pk+"X"];
-      if(prefs[pk+"Y"]!==undefined)d.ty=prefs[pk+"Y"];
-      if(prefs[pk+"Rot"]!==undefined)d.trot=prefs[pk+"Rot"];
+  // Push remote position updates into the live draggable states
+  if(applyingRemote&&window._draggableStates){
+    window._draggableStates.forEach(ds=>{
+      const pk=ds.prefKey;
+      if(prefs[pk+"X"]!==undefined)ds.tx=prefs[pk+"X"];
+      if(prefs[pk+"Y"]!==undefined)ds.ty=prefs[pk+"Y"];
+      if(prefs[pk+"Rot"]!==undefined)ds.trot=prefs[pk+"Rot"];
     });
   }
 }
@@ -280,7 +276,7 @@ applyPrefs();
 // ═══════════════════════════════════════
 let lastKnownUsername="";
 let prefsUnsub=null;
-let signedIn=false; // tracks whether WE are signed in (not Firebase's async state)
+let signedIn=false;
 
 function showMsg(text,type){
   const el=document.getElementById("authMsg");
@@ -326,27 +322,22 @@ onAuthStateChanged(auth,async user=>{
   if(prefsUnsub){prefsUnsub();prefsUnsub=null;}
 
   if(!user){
-    // Only show login overlay if we were previously signed in or on first load
     if(signedIn){
-      // We got signed out — show login
       signedIn=false;
       showLoginForms();
       document.getElementById("authOverlay").classList.add("active");
       prefs={...DEFAULT_PREFS};
       applyPrefs();
     }else{
-      // First load, not signed in — just show login
       showLoginForms();
       document.getElementById("authOverlay").classList.add("active");
     }
     return;
   }
 
-  // User is signed in
   signedIn=true;
   await registerDevice(user.uid);
 
-  // Count active devices
   try{
     const all=await getDocs(collection(db,"users",user.uid,"devices"));
     updateDeviceIndicator(all.size);
@@ -376,7 +367,6 @@ onAuthStateChanged(auth,async user=>{
     document.getElementById("authOverlay").classList.remove("active");
   }
 
-  // Real-time sync from other devices
   prefsUnsub=onSnapshot(ref,snap=>{
     if(!snap.exists())return;
     const d=snap.data();
@@ -474,7 +464,6 @@ document.getElementById("changePassForm").onsubmit=async function(e){
 document.getElementById("signoutBtn").onclick=async function(){
   this.classList.add("signing-out");
 
-  // Save prefs before signing out
   if(auth.currentUser){
     const data={};
     ["font","color","counterX","counterY","counterRot","timerX","timerY","timerRot","watermarkX","watermarkY"].forEach(k=>data[k]=prefs[k]);
@@ -482,14 +471,11 @@ document.getElementById("signoutBtn").onclick=async function(){
     await unregisterDevice(auth.currentUser.uid);
   }
 
-  // Stop listening to Firestore BEFORE signing out
   if(prefsUnsub){prefsUnsub();prefsUnsub=null;}
 
   signedIn=false;
   await signOut(auth);
 
-  // Reset UI — onAuthStateChanged won't fight us because signedIn=false
-  // and we already unsubscribed
   prefs={...DEFAULT_PREFS};
   applyPrefs();
   showLoginForms();
@@ -526,20 +512,29 @@ function updateTimer(){
 updateTimer();
 
 // ═══════════════════════════════════════
-// DRAGGABLE OBJECTS — single keydown handler, instant position restore
+// DRAGGABLE OBJECTS
+// Each draggable gets a STATE OBJECT that both the animation loop
+// and the keydown handler reference directly — no closure variable drift.
 // ═══════════════════════════════════════
 let selected=null;
-const draggables=[];
+window._draggableStates=[];
 
 function setupObject(el,prefKey,isCenter,horizontalOnly,noRotation){
-  // Restore saved position INSTANTLY — no lerp from zero
-  let tx=prefs[prefKey+"X"]||0;
-  let ty=prefs[prefKey+"Y"]||0;
-  let trot=prefs[prefKey+"Rot"]||0;
-  // Start visual position AT the target — no slide-in
-  let x=tx,y=ty,rot=trot;
+  // The single state object — everything reads/writes this
+  const state={
+    el,prefKey,isCenter,horizontalOnly,noRotation,
+    // Current visual position (lerps toward tx/ty/trot)
+    x:prefs[prefKey+"X"]||0,
+    y:prefs[prefKey+"Y"]||0,
+    rot:prefs[prefKey+"Rot"]||0,
+    // Target position
+    tx:prefs[prefKey+"X"]||0,
+    ty:prefs[prefKey+"Y"]||0,
+    trot:prefs[prefKey+"Rot"]||0,
+  };
 
-  el._state={get targetRotation(){return trot},set targetRotation(v){trot=v;},noRotation,prefKey};
+  // Expose state to element for click handler
+  el._state={get targetRotation(){return state.trot},set targetRotation(v){state.trot=v},noRotation,prefKey};
 
   el.addEventListener("click",()=>{
     const p=document.getElementById("panel");
@@ -553,41 +548,43 @@ function setupObject(el,prefKey,isCenter,horizontalOnly,noRotation){
   function clamp(){
     const r=el.getBoundingClientRect();
     if(horizontalOnly){
-      if(r.left<0)tx-=r.left;
-      if(r.right>window.innerWidth)tx-=r.right-window.innerWidth;
-      ty=0;
+      if(r.left<0)state.tx-=r.left;
+      if(r.right>window.innerWidth)state.tx-=r.right-window.innerWidth;
+      state.ty=0;
     }else{
-      if(r.left<0)tx-=r.left;
-      if(r.right>window.innerWidth)tx-=r.right-window.innerWidth;
-      if(r.top<0)ty-=r.top;
-      if(r.bottom>window.innerHeight)ty-=r.bottom-window.innerHeight;
+      if(r.left<0)state.tx-=r.left;
+      if(r.right>window.innerWidth)state.tx-=r.right-window.innerWidth;
+      if(r.top<0)state.ty-=r.top;
+      if(r.bottom>window.innerHeight)state.ty-=r.bottom-window.innerHeight;
     }
   }
 
   function animate(){
     clamp();
-    x+=(tx-x)*0.10;y+=(ty-y)*0.10;rot+=(trot-rot)*0.10;
-    el.style.transform=isCenter?"translate(-50%,-50%) translate("+x+"px,"+y+"px) rotate("+rot+"deg)":"translate("+x+"px,"+y+"px) rotate("+rot+"deg)";
+    state.x+=(state.tx-state.x)*0.10;
+    state.y+=(state.ty-state.y)*0.10;
+    state.rot+=(state.trot-state.rot)*0.10;
+    el.style.transform=isCenter
+      ?"translate(-50%,-50%) translate("+state.x+"px,"+state.y+"px) rotate("+state.rot+"deg)"
+      :"translate("+state.x+"px,"+state.y+"px) rotate("+state.rot+"deg)";
     requestAnimationFrame(animate);
   }
   animate();
 
-  draggables.push({el,tx,ty,trot,prefKey,horizontalOnly,
-    get x(){return x},set x(v){x=v},
-    get y(){return y},set y(v){y=v},
-    get rot(){return rot},set rot(v){rot=v},
-  });
+  window._draggableStates.push(state);
 }
 
 setupObject(document.getElementById("counter"),"counter",true,false,false);
 setupObject(document.getElementById("timer"),"timer",false,false,false);
 setupObject(document.getElementById("watermark"),"watermark",false,true,true);
 
-// SINGLE keydown handler for all draggables — no duplicates
+// SINGLE keydown handler — reads/writes the shared state objects
 window.addEventListener("keydown",e=>{
   if(!selected)return;
-  const d=draggables.find(d=>d.el===selected);
-  if(!d)return;
+
+  // Find the state object for the selected element
+  const state=window._draggableStates.find(s=>s.el===selected);
+  if(!state)return;
 
   const p=document.getElementById("panel");
   const ap=document.getElementById("advancedPanel");
@@ -597,23 +594,22 @@ window.addEventListener("keydown",e=>{
   let moved=false;
 
   // Rotation with J/L
-  if((k==="j"||k==="l")&&!d.el._state.noRotation){
-    const newRot=Math.max(-90,Math.min(90,d.trot+(k==="j"?10:-10)));
-    d.trot=newRot;
-    d.el._state.targetRotation=newRot;
-    prefs[d.prefKey+"Rot"]=newRot;
+  if((k==="j"||k==="l")&&!state.noRotation){
+    state.trot=Math.max(-90,Math.min(90,state.trot+(k==="j"?10:-10)));
+    selected._state.targetRotation=state.trot;
+    prefs[state.prefKey+"Rot"]=state.trot;
     moved=true;
   }
 
   // Movement with WASD/arrows
-  if(k==="w"||k==="arrowup"){if(!d.horizontalOnly){d.ty-=40;moved=true;}}
-  else if(k==="s"||k==="arrowdown"){if(!d.horizontalOnly){d.ty+=40;moved=true;}}
-  else if(k==="a"||k==="arrowleft"){d.tx-=40;moved=true;}
-  else if(k==="d"||k==="arrowright"){d.tx+=40;moved=true;}
+  if(k==="w"||k==="arrowup"){if(!state.horizontalOnly){state.ty-=40;moved=true;}}
+  else if(k==="s"||k==="arrowdown"){if(!state.horizontalOnly){state.ty+=40;moved=true;}}
+  else if(k==="a"||k==="arrowleft"){state.tx-=40;moved=true;}
+  else if(k==="d"||k==="arrowright"){state.tx+=40;moved=true;}
 
   if(moved){
-    prefs[d.prefKey+"X"]=d.tx;
-    prefs[d.prefKey+"Y"]=d.ty;
+    prefs[state.prefKey+"X"]=state.tx;
+    prefs[state.prefKey+"Y"]=state.ty;
     localStorage.setItem("counterPrefs",JSON.stringify(prefs));
     saveToFirestore();
   }
@@ -664,4 +660,12 @@ function drawWheel(){
 }
 
 function pickColor(e){
-  const rect=cw.getBoundingClient
+  const rect=cw.getBoundingClientRect();
+  const x=Math.floor(e.clientX-rect.left),y=Math.floor(e.clientY-rect.top);
+  const d=cctx.getImageData(x,y,1,1).data;
+  if(d[3]>0)changePref("color","rgb("+d[0]+","+d[1]+","+d[2]+")");
+}
+
+drawWheel();
+let wheelDragging=false;
+cw.addEventListener("mousedown",e=>{wheelDr
