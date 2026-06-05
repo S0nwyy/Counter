@@ -73,6 +73,9 @@ button:hover{background:rgba(255,255,255,.25)}
 .change-pass-form .auth-field input{padding:7px 10px;font-size:.82em}
 .change-pass-form .auth-btn{padding:8px;font-size:.82em;margin-top:4px;background:rgba(100,180,255,.1);color:#7ab8ff;border:1px solid rgba(100,180,255,.18)}
 .change-pass-form .auth-btn:hover{background:rgba(100,180,255,.2)}
+
+/* Device indicator */
+#deviceIndicator{position:fixed;bottom:10px;left:10px;font-size:.68em;color:#555;opacity:.6}
 </style>
 </head>
 <body>
@@ -81,6 +84,7 @@ button:hover{background:rgba(255,255,255,.25)}
 <div id="versionPopup">V1.2.0</div>
 <div id="counter">0</div>
 <div id="timer">0:00:00</div>
+<div id="deviceIndicator"></div>
 
 <div id="panel" class="panel">
   <h3>Fonts</h3><div id="fontList"></div>
@@ -140,7 +144,7 @@ button:hover{background:rgba(255,255,255,.25)}
 <script type="module">
 import{initializeApp}from"https://www.gstatic.com/firebasejs/12.14.0/firebase-app.js";
 import{getAuth,onAuthStateChanged,createUserWithEmailAndPassword,signInWithEmailAndPassword,signOut,EmailAuthProvider,reauthenticateWithCredential,updatePassword,setPersistence,browserLocalPersistence}from"https://www.gstatic.com/firebasejs/12.14.0/firebase-auth.js";
-import{getFirestore,doc,getDoc,setDoc,onSnapshot}from"https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
+import{getFirestore,doc,getDoc,setDoc,onSnapshot,updateDoc,deleteDoc,collection,query,where,getDocs,serverTimestamp}from"https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
 
 const firebaseConfig={apiKey:"AIzaSyBesgnQfvIrgj2Ewn4X0A0qvFnmaZbQ3Lc",authDomain:"counter-2ca08.firebaseapp.com",projectId:"counter-2ca08",storageBucket:"counter-2ca08.firebasestorage.app",messagingSenderId:"513934053456",appId:"1:513934053456:web:75b9cb3142050d88690155",measurementId:"G-BEQJ0TWES5"};
 const app=initializeApp(firebaseConfig);
@@ -149,9 +153,67 @@ const db=getFirestore(app);
 await setPersistence(auth,browserLocalPersistence);
 
 // ═══════════════════════════════════════
-// PREFS SYSTEM
+// DEVICE SESSION MANAGEMENT (max 3)
 // ═══════════════════════════════════════
-const DEFAULT_PREFS={font:"Arial",color:"#ffffff"};
+const MAX_DEVICES=3;
+const DEVICE_ID=localStorage.getItem("counterDeviceId")||(()=>{
+  const id="dev_"+Math.random().toString(36).slice(2,10)+Date.now().toString(36);
+  localStorage.setItem("counterDeviceId",id);
+  return id;
+})();
+
+async function registerDevice(uid){
+  const devicesRef=collection(db,"users",uid,"devices");
+  const deviceDoc=doc(devicesRef,DEVICE_ID);
+  const snap=await getDoc(deviceDoc);
+  if(!snap.exists()){
+    const q=query(devicesRef);
+    const all=await getDocs(q);
+    if(all.size>=MAX_DEVICES){
+      // Remove oldest device
+      const sorted=all.docs.sort((a,b)=>{
+        const ta=a.data().lastSeen?.toMillis?.()||0;
+        const tb=b.data().lastSeen?.toMillis?.()||0;
+        return ta-tb;
+      });
+      for(let i=0;i<sorted.length-MAX_DEVICES+1;i++){
+        await deleteDoc(doc(devicesRef,sorted[i].id));
+      }
+    }
+  }
+  await setDoc(deviceDoc,{id:DEVICE_ID,lastSeen:serverTimestamp(),userAgent:navigator.userAgent.slice(0,100)});
+}
+
+async function unregisterDevice(uid){
+  try{
+    await deleteDoc(doc(db,"users",uid,"devices",DEVICE_ID));
+  }catch(e){}
+}
+
+async function getActiveDeviceCount(uid){
+  try{
+    const snap=await getDocs(collection(db,"users",uid,"devices"));
+    return snap.size;
+  }catch(e){return 0;}
+}
+
+function updateDeviceIndicator(count){
+  const el=document.getElementById("deviceIndicator");
+  if(!el)return;
+  if(count>1)el.textContent=`${count} devices active`;
+  else el.textContent="";
+}
+
+// ═══════════════════════════════════════
+// PREFS SYSTEM — includes positions + rotation
+// ═══════════════════════════════════════
+const DEFAULT_PREFS={
+  font:"Arial",color:"#ffffff",
+  counterX:0,counterY:0,counterRot:0,
+  timerX:0,timerY:0,timerRot:0,
+  watermarkX:0,watermarkY:0
+};
+
 let prefs=JSON.parse(localStorage.getItem("counterPrefs")||"{}");
 prefs={...DEFAULT_PREFS,...prefs};
 
@@ -171,13 +233,26 @@ COLORS.forEach(c=>{
   document.getElementById("colorGrid").appendChild(d);
 });
 
+// Debounced Firestore write — fires 300ms after last change
+let saveTimeout=null;
+function saveToFirestore(){
+  if(!auth.currentUser)return;
+  clearTimeout(saveTimeout);
+  saveTimeout=setTimeout(()=>{
+    const data={};
+    // Only sync these keys to Firestore
+    ["font","color","counterX","counterY","counterRot","timerX","timerY","timerRot","watermarkX","watermarkY"].forEach(k=>{
+      data[k]=prefs[k];
+    });
+    setDoc(doc(db,"users",auth.currentUser.uid),{prefs:data},{merge:true}).catch(()=>{});
+  },300);
+}
+
 function changePref(key,val){
   if(prefs[key]===val)return;
   prefs[key]=val;
   applyPrefs();
-  if(auth.currentUser){
-    setDoc(doc(db,"users",auth.currentUser.uid),{prefs:{[key]:val}},{merge:true}).catch(()=>{});
-  }
+  saveToFirestore();
 }
 
 function applyPrefs(){
@@ -202,6 +277,7 @@ applyPrefs();
 // ═══════════════════════════════════════
 let lastKnownUsername="";
 let prefsUnsub=null;
+let isSigningOut=false;  // <-- critical flag to prevent onAuthStateChanged from re-showing account
 
 function showMsg(text,type){
   const el=document.getElementById("authMsg");
@@ -244,8 +320,26 @@ function toEmail(u){return u.replace(/[^a-zA-Z0-9]/g,"_")+"@counter.app"}
 
 // Auth state
 onAuthStateChanged(auth,async user=>{
+  // If we're in the middle of signing out, ignore everything
+  if(isSigningOut)return;
+
   if(prefsUnsub){prefsUnsub();prefsUnsub=null;}
-  if(!user)return;
+
+  if(!user){
+    // User signed out — show login
+    showLoginForms();
+    document.getElementById("authOverlay").classList.add("active");
+    // Reset to defaults
+    prefs={...DEFAULT_PREFS};
+    applyPrefs();
+    return;
+  }
+
+  // User signed in
+  await registerDevice(user.uid);
+  const deviceCount=await getActiveDeviceCount(user.uid);
+  updateDeviceIndicator(deviceCount);
+
   const ref=doc(db,"users",user.uid);
   try{
     const snap=await getDoc(ref);
@@ -254,8 +348,15 @@ onAuthStateChanged(auth,async user=>{
       showAccount(d.username||user.email);
       document.getElementById("authOverlay").classList.remove("active");
       if(d.prefs){
-        if(d.prefs.font&&d.prefs.font!==prefs.font){prefs.font=d.prefs.font;applyPrefs()}
-        if(d.prefs.color&&d.prefs.color!==prefs.color){prefs.color=d.prefs.color;applyPrefs()}
+        // Merge server prefs — server wins for shared state
+        let changed=false;
+        Object.keys(d.prefs).forEach(k=>{
+          if(d.prefs[k]!==undefined&&d.prefs[k]!==prefs[k]){
+            prefs[k]=d.prefs[k];
+            changed=true;
+          }
+        });
+        if(changed)applyPrefs();
       }
     }else{
       showAccount(user.email);
@@ -265,18 +366,25 @@ onAuthStateChanged(auth,async user=>{
     showAccount(user.email);
     document.getElementById("authOverlay").classList.remove("active");
   }
-  // Real-time sync
+
+  // Real-time sync — listens for changes from OTHER devices
   prefsUnsub=onSnapshot(ref,snap=>{
     if(!snap.exists())return;
     const d=snap.data();
     if(!d.prefs)return;
-    if(d.prefs.font&&d.prefs.font!==prefs.font){prefs.font=d.prefs.font;applyPrefs()}
-    if(d.prefs.color&&d.prefs.color!==prefs.color){prefs.color=d.prefs.color;applyPrefs()}
+    let changed=false;
+    Object.keys(d.prefs).forEach(k=>{
+      if(d.prefs[k]!==undefined&&d.prefs[k]!==prefs[k]){
+        prefs[k]=d.prefs[k];
+        changed=true;
+      }
+    });
+    if(changed)applyPrefs();
   },()=>{});
 });
 
 // ═══════════════════════════════════════
-// EVENT HANDLERS (no inline onclick)
+// EVENT HANDLERS
 // ═══════════════════════════════════════
 document.getElementById("tabSignin").onclick=()=>switchTab("signin");
 document.getElementById("tabSignup").onclick=()=>switchTab("signup");
@@ -353,26 +461,50 @@ document.getElementById("changePassForm").onsubmit=async function(e){
 };
 
 document.getElementById("signoutBtn").onclick=async function(){
+  // Set flag BEFORE anything else — prevents onAuthStateChanged from fighting us
+  isSigningOut=true;
+
   this.classList.add("signing-out");
+
+  // Save current prefs before signing out
   if(auth.currentUser){
-    await setDoc(doc(db,"users",auth.currentUser.uid),{prefs:{font:prefs.font,color:prefs.color}},{merge:true}).catch(()=>{});
+    const data={};
+    ["font","color","counterX","counterY","counterRot","timerX","timerY","timerRot","watermarkX","watermarkY"].forEach(k=>{
+      data[k]=prefs[k];
+    });
+    await setDoc(doc(db,"users",auth.currentUser.uid),{prefs:data},{merge:true}).catch(()=>{});
+    await unregisterDevice(auth.currentUser.uid);
   }
+
   if(prefsUnsub){prefsUnsub();prefsUnsub=null;}
+
   await signOut(auth);
-  prefs.font=DEFAULT_PREFS.font;prefs.color=DEFAULT_PREFS.color;
+
+  // Reset to defaults
+  prefs={...DEFAULT_PREFS};
   applyPrefs();
+
+  // Show login UI
   showLoginForms();
   document.getElementById("authOverlay").classList.add("active");
   this.classList.remove("signing-out");
+
+  // Clear flag after a short delay — enough for Firebase to propagate
+  setTimeout(()=>{isSigningOut=false;},1000);
 };
 
-// Account panel button
+// Account panel toggle
 document.addEventListener("keydown",e=>{
   if(e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==="l"){
     e.preventDefault();
     const ov=document.getElementById("authOverlay");
-    if(ov.classList.contains("active")){ov.classList.remove("active")}
-    else{if(auth.currentUser)showAccount(lastKnownUsername||auth.currentUser.email);else showLoginForms();ov.classList.add("active")}
+    if(ov.classList.contains("active")){
+      ov.classList.remove("active");
+    }else{
+      if(auth.currentUser)showAccount(lastKnownUsername||auth.currentUser.email);
+      else showLoginForms();
+      ov.classList.add("active");
+    }
   }
 });
 
@@ -390,13 +522,19 @@ function updateTimer(){
 updateTimer();
 
 // ═══════════════════════════════════════
-// DRAGGABLE OBJECTS
+// DRAGGABLE OBJECTS — with Firestore sync
 // ═══════════════════════════════════════
 let selected=null;
 
-function setupObject(el,isCenter,horizontalOnly,noRotation){
-  let x=0,y=0,tx=0,ty=0,rot=0,trot=0;
-  el._state={get targetRotation(){return trot},set targetRotation(v){trot=v},noRotation};
+function setupObject(el,prefKey,isCenter,horizontalOnly,noRotation){
+  // Restore saved position
+  let tx=prefs[prefKey+"X"]||0;
+  let ty=prefs[prefKey+"Y"]||0;
+  let trot=prefs[prefKey+"Rot"]||0;
+  let x=0,y=0,rot=0;
+
+  el._state={get targetRotation(){return trot},set targetRotation(v){trot=v;},noRotation,_prefKey:prefKey};
+
   el.addEventListener("click",()=>{
     const p=document.getElementById("panel");
     const ap=document.getElementById("advancedPanel");
@@ -405,6 +543,7 @@ function setupObject(el,isCenter,horizontalOnly,noRotation){
     document.querySelectorAll(".selected").forEach(e=>e.classList.remove("selected"));
     selected=el;el.classList.add("selected");
   });
+
   function clamp(){
     const r=el.getBoundingClientRect();
     if(horizontalOnly){
@@ -418,6 +557,7 @@ function setupObject(el,isCenter,horizontalOnly,noRotation){
       if(r.bottom>window.innerHeight)ty-=r.bottom-window.innerHeight;
     }
   }
+
   function animate(){
     clamp();
     x+=(tx-x)*0.10;y+=(ty-y)*0.10;rot+=(trot-rot)*0.10;
@@ -425,29 +565,45 @@ function setupObject(el,isCenter,horizontalOnly,noRotation){
     requestAnimationFrame(animate);
   }
   animate();
+
+  // Save position/rotation on every key move
   window.addEventListener("keydown",e=>{
     if(selected!==el)return;
     const p=document.getElementById("panel");
     const ap=document.getElementById("advancedPanel");
     if(!p.classList.contains("active")&&!ap.classList.contains("active"))return;
     const k=e.key.toLowerCase();
-    if(k==="w"||k==="arrowup"){if(!horizontalOnly)ty-=40}
-    else if(k==="s"||k==="arrowdown"){if(!horizontalOnly)ty+=40}
-    else if(k==="a"||k==="arrowleft")tx-=40;
-    else if(k==="d"||k==="arrowright")tx+=40;
+    let moved=false;
+    if(k==="w"||k==="arrowup"){if(!horizontalOnly){ty-=40;moved=true;}}
+    else if(k==="s"||k==="arrowdown"){if(!horizontalOnly){ty+=40;moved=true;}}
+    else if(k==="a"||k==="arrowleft"){tx-=40;moved=true;}
+    else if(k==="d"||k==="arrowright"){tx+=40;moved=true;}
+
+    if(moved){
+      // Save to prefs immediately
+      prefs[prefKey+"X"]=tx;
+      prefs[prefKey+"Y"]=ty;
+      localStorage.setItem("counterPrefs",JSON.stringify(prefs));
+      saveToFirestore();
+    }
   });
+
   window.addEventListener("resize",clamp);
 }
 
-setupObject(document.getElementById("counter"),true,false,false);
-setupObject(document.getElementById("timer"),false,false,false);
-setupObject(document.getElementById("watermark"),false,true,true);
+setupObject(document.getElementById("counter"),"counter",true,false,false);
+setupObject(document.getElementById("timer"),"timer",false,false,false);
+setupObject(document.getElementById("watermark"),"watermark",false,true,true);
 
-// J/L rotation
+// J/L rotation — also saves
 window.addEventListener("keydown",e=>{
   const k=e.key.toLowerCase();
   if((k==="j"||k==="l")&&selected&&selected._state&&!selected._state.noRotation){
     selected._state.targetRotation=Math.max(-90,Math.min(90,selected._state.targetRotation+(k==="j"?10:-10)));
+    const key=selected._state._prefKey;
+    prefs[key+"Rot"]=selected._state.targetRotation;
+    localStorage.setItem("counterPrefs",JSON.stringify(prefs));
+    saveToFirestore();
   }
 });
 
