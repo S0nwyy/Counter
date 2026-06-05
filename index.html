@@ -138,24 +138,18 @@ button:hover{background:rgba(255,255,255,.25)}
 </div>
 
 <script type="module">
+// ── Firebase imports ──
 import{initializeApp}from"https://www.gstatic.com/firebasejs/12.14.0/firebase-app.js";
 import{getAuth,onAuthStateChanged,createUserWithEmailAndPassword,signInWithEmailAndPassword,signOut,EmailAuthProvider,reauthenticateWithCredential,updatePassword,setPersistence,browserLocalPersistence}from"https://www.gstatic.com/firebasejs/12.14.0/firebase-auth.js";
 import{getFirestore,doc,getDoc,setDoc,onSnapshot}from"https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
 
-const firebaseConfig={
-  apiKey:"AIzaSyBesgnQfvIrgj2Ewn4X0A0qvFnmaZbQ3Lc",
-  authDomain:"counter-2ca08.firebaseapp.com",
-  projectId:"counter-2ca08",
-  storageBucket:"counter-2ca08.firebasestorage.app",
-  messagingSenderId:"513934053456",
-  appId:"1:513934053456:web:75b9cb3142050d88690155",
-  measurementId:"G-BEQJ0TWES5"
-};
+const firebaseConfig={apiKey:"AIzaSyBesgnQfvIrgj2Ewn4X0A0qvFnmaZbQ3Lc",authDomain:"counter-2ca08.firebaseapp.com",projectId:"counter-2ca08",storageBucket:"counter-2ca08.firebasestorage.app",messagingSenderId:"513934053456",appId:"1:513934053456:web:75b9cb3142050d88690155",measurementId:"G-BEQJ0TWES5"};
 const app=initializeApp(firebaseConfig);
 const auth=getAuth(app);
 const db=getFirestore(app);
 await setPersistence(auth,browserLocalPersistence);
 
+// ── DOM refs ──
 const panel=document.getElementById("panel");
 const advancedPanel=document.getElementById("advancedPanel");
 const counter=document.getElementById("counter");
@@ -170,61 +164,72 @@ const ctx=colorWheelCanvas.getContext("2d");
 const authOverlay=document.getElementById("authOverlay");
 const authMsg=document.getElementById("authMsg");
 
-// ── Prefs ──
-let prefs=JSON.parse(localStorage.getItem("counterPrefs")||'{"font":"Arial","color":"#ffffff"}');
+// ── Prefs system ──
+const defaultPrefs={font:"Arial",color:"#ffffff"};
+let prefs={...defaultPrefs,...JSON.parse(localStorage.getItem("counterPrefs")||"{}")};
+
+// Font list (store normalized names to avoid browser quirks)
+const FONT_LIST=["Arial","Verdana","Tahoma","Georgia","Courier New","Times New Roman","Impact","Comic Sans MS"];
+const COLOR_LIST=["#ffffff","#4da6ff","#ff9966","#ffd24d","#ff4d6d","#66ff99","#b366ff","#00e5ff"];
+
+// Build font options — store the font name on the element for reliable matching
+FONT_LIST.forEach(f=>{
+  const d=document.createElement("div");
+  d.className="font-option";d.textContent=f;d.style.fontFamily=f;d.dataset.font=f;
+  d.onclick=()=>{setPref("font",f)};
+  fontList.appendChild(d);
+});
+COLOR_LIST.forEach(c=>{
+  const d=document.createElement("div");
+  d.className="color";d.style.background=c;d.dataset.color=c;
+  d.onclick=()=>{setPref("color",c)};
+  colorGrid.appendChild(d);
+});
+
+function setPref(key,val){
+  if(prefs[key]===val)return; // no change
+  prefs[key]=val;
+  applyPrefsToUI();
+  // Save to cloud if logged in
+  if(auth.currentUser){
+    setDoc(doc(db,"users",auth.currentUser.uid),{preferences:{[key]:val}},{merge:true}).catch(()=>{});
+  }
+}
 
 function applyPrefsToUI(){
   document.body.style.fontFamily=prefs.font;
   document.body.style.color=prefs.color;
   localStorage.setItem("counterPrefs",JSON.stringify(prefs));
+  // Highlight active selections using data attributes
   document.querySelectorAll(".font-option").forEach(el=>{
-    const active=el.style.fontFamily===prefs.font;
+    const active=el.dataset.font===prefs.font;
     el.style.outline=active?"2px solid #ffe066":"none";
     el.style.background=active?"rgba(255,224,102,.15)":"rgba(255,255,255,.05)";
   });
   document.querySelectorAll(".color").forEach(el=>{
-    const hex=el.style.background.startsWith("#")?el.style.background:"#"+el.style.background.match(/\d+/g)?.slice(0,3).map(x=>parseInt(x).toString(16).padStart(2,"0")).join("")||"";
-    const active=hex.toLowerCase()===prefs.color.toLowerCase();
+    const active=el.dataset.color&&el.dataset.color.toLowerCase()===prefs.color.toLowerCase();
     el.style.outline=active?"2px solid #ffe066":"none";
     el.style.boxShadow=active?"0 0 12px rgba(255,224,102,.6)":"none";
   });
 }
-
-function savePrefsToCloud(){
-  if(!auth.currentUser)return Promise.resolve();
-  return setDoc(doc(db,"users",auth.currentUser.uid),{
-    prefs:{font:prefs.font,color:prefs.color}
-  },{merge:true}).catch(()=>{});
-}
-
-// Build font/color UI
-["Arial","Verdana","Tahoma","Georgia","Courier New","Times New Roman","Impact","Comic Sans MS"].forEach(f=>{
-  const d=document.createElement("div");
-  d.className="font-option";d.textContent=f;d.style.fontFamily=f;
-  d.onclick=()=>{prefs.font=f;applyPrefsToUI();savePrefsToCloud()};
-  fontList.appendChild(d);
-});
-["#ffffff","#4da6ff","#ff9966","#ffd24d","#ff4d6d","#66ff99","#b366ff","#00e5ff"].forEach(c=>{
-  const d=document.createElement("div");
-  d.className="color";d.style.background=c;
-  d.onclick=()=>{prefs.color=c;applyPrefsToUI();savePrefsToCloud()};
-  colorGrid.appendChild(d);
-});
 applyPrefsToUI();
 
-// ── Auth UI helpers ──
+// ── Auth helpers ──
+let lastKnownUsername="";
+let prefsUnsub=null;
+
 function showAuthMsg(text,type=""){authMsg.textContent=text;authMsg.className="auth-msg"+(type?" "+type:"")}
 
 function switchAuthTab(tab){
   const views={signin:"signinForm",signup:"signupForm"};
   const cur=window._currentAuthView||"signin";
-  if(cur===tab){showAuthMsg("");return}
+  if(cur===tab)return;
   const from=document.getElementById(views[cur]);
   if(from){from.classList.remove("slide-in");from.classList.add("slide-out-left");setTimeout(()=>{from.classList.add("auth-hidden");from.classList.remove("slide-out-left")},280)}
   document.querySelectorAll(".auth-tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===tab));
   document.getElementById("authTitle").textContent=tab==="signin"?"Sign In":"Sign Up";
   const to=document.getElementById(views[tab]);if(to){to.classList.remove("auth-hidden");to.classList.add("slide-in")}
-  showAuthMsg("");window._currentAuthView=tab;
+  window._currentAuthView=tab;showAuthMsg("");
 }
 
 function showSignedInView(name){
@@ -247,45 +252,47 @@ function showAuthForms(){
 
 function emailFromUsername(u){return u.replace(/[^a-zA-Z0-9]/g,"_")+"@counter.app"}
 
-// ── Auth state + real-time prefs sync ──
-let prefsUnsub=null;
-let skipFirstSnapshot=false;
-
-onAuthStateChanged(auth,async(user)=>{
+// ── Auth state + real-time sync ──
+onAuthStateChanged(auth,async user=>{
+  // Cleanup previous listener
   if(prefsUnsub){prefsUnsub();prefsUnsub=null;}
   if(!user)return;
   const userRef=doc(db,"users",user.uid);
-  // Load username + prefs
+  // Load username + prefs once
   try{
-    const d=await getDoc(userRef);
-    const name=(d.exists()&&d.data().username)?d.data().username:user.email;
-    showSignedInView(name);
-    authOverlay.classList.remove("active");
-    if(d.exists()&&d.data().prefs){
-      const p=d.data().prefs;
-      if(p.font)prefs.font=p.font;
-      if(p.color)prefs.color=p.color;
-      applyPrefsToUI();
+    const snap=await getDoc(userRef);
+    if(snap.exists()){
+      const data=snap.data();
+      showSignedInView(data.username||user.email);
+      authOverlay.classList.remove("active");
+      // Load saved prefs (Firestore wins over local)
+      if(data.preferences){
+        if(data.preferences.font)setPref("font",data.preferences.font);
+        if(data.preferences.color)setPref("color",data.preferences.color);
+      }else if(data.prefs){ // legacy format
+        if(data.prefs.font)setPref("font",data.prefs.font);
+        if(data.prefs.color)setPref("color",data.prefs.color);
+      }
+    }else{
+      showSignedInView(user.email);
+      authOverlay.classList.remove("active");
     }
   }catch(e){
     showSignedInView(user.email);
     authOverlay.classList.remove("active");
   }
-  // Real-time sync — skip first snapshot (it's just confirming what we already loaded)
-  skipFirstSnapshot=true;
-  prefsUnsub=onSnapshot(userRef,(snap)=>{
-    if(skipFirstSnapshot){skipFirstSnapshot=false;return;}
+  // Real-time listener — fires on every change from any device
+  prefsUnsub=onSnapshot(userRef,snap=>{
     if(!snap.exists())return;
     const data=snap.data();
-    if(!data.prefs)return;
-    let changed=false;
-    if(data.prefs.font&&data.prefs.font!==prefs.font){prefs.font=data.prefs.font;changed=true;}
-    if(data.prefs.color&&data.prefs.color!==prefs.color){prefs.color=data.prefs.color;changed=true;}
-    if(changed)applyPrefsToUI();
-  });
+    const src=data.preferences||data.prefs;
+    if(!src)return;
+    if(src.font&&src.font!==prefs.font){prefs.font=src.font;applyPrefsToUI()}
+    if(src.color&&src.color!==prefs.color){prefs.color=src.color;applyPrefsToUI()}
+  },()=>{/* offline */});
 });
 
-// ── Auth handlers ──
+// ── Auth handlers (exposed for inline onclick) ──
 window.handleSignUp=async function(e){
   e.preventDefault();
   const u=document.getElementById("signupUsername").value.trim();
@@ -293,28 +300,23 @@ window.handleSignUp=async function(e){
   const c=document.getElementById("signupConfirm").value;
   if(!u)return showAuthMsg("Username is required","error");
   if(p!==c)return showAuthMsg("Passwords do not match","error");
-  if(p.length<6)return showAuthMsg("Password must be at least 6 characters","error");
+  if(p.length<6)return showAuthMsg("Min 6 chars","error");
   try{
     const cred=await createUserWithEmailAndPassword(auth,emailFromUsername(u),p);
-    await setDoc(doc(db,"users",cred.user.uid),{username:u,prefs:{font:prefs.font,color:prefs.color}});
+    await setDoc(doc(db,"users",cred.user.uid),{username:u,preferences:{font:prefs.font,color:prefs.color}});
     showAuthMsg("Account created!","success");
     setTimeout(()=>authOverlay.classList.remove("active"),800);
   }catch(err){
-    if(err.code==="auth/email-already-in-use")showAuthMsg("Username already taken","error");
-    else showAuthMsg(err.message,"error");
+    showAuthMsg(err.code==="auth/email-already-in-use"?"Username taken":err.message,"error");
   }
 };
 
 window.handleSignIn=async function(e){
   e.preventDefault();
-  const u=document.getElementById("signinUsername").value.trim();
-  const p=document.getElementById("signinPassword").value;
   try{
-    await signInWithEmailAndPassword(auth,emailFromUsername(u),p);
+    await signInWithEmailAndPassword(auth,emailFromUsername(document.getElementById("signinUsername").value.trim()),document.getElementById("signinPassword").value);
   }catch(err){
-    if(err.code==="auth/user-not-found")showAuthMsg("No account found","error");
-    else if(err.code==="auth/wrong-password"||err.code==="auth/invalid-credential")showAuthMsg("Incorrect password","error");
-    else showAuthMsg(err.message,"error");
+    showAuthMsg(err.code==="auth/user-not-found"?"No account found":err.code==="auth/wrong-password"||err.code==="auth/invalid-credential"?"Wrong password":err.message,"error");
   }
 };
 
@@ -323,7 +325,7 @@ window.toggleChangePass=function(){
   const b=document.getElementById("changePassToggle");
   w.classList.toggle("open");
   b.textContent=w.classList.contains("open")?"Cancel":"Change Password";
-  if(!w.classList.contains("open")){document.getElementById("currPassword").value="";document.getElementById("newPassword").value="";document.getElementById("confirmNewPassword").value="";showAuthMsg("")}
+  if(!w.classList.contains("open")){["currPassword","newPassword","confirmNewPassword"].forEach(id=>document.getElementById(id).value="");showAuthMsg("")}
 };
 
 window.handleChangePassword=async function(e){
@@ -331,30 +333,28 @@ window.handleChangePassword=async function(e){
   const cur=document.getElementById("currPassword").value;
   const np=document.getElementById("newPassword").value;
   const cf=document.getElementById("confirmNewPassword").value;
-  if(np.length<6)return showAuthMsg("Min 6 characters","error");
-  if(np!==cf)return showAuthMsg("Passwords do not match","error");
+  if(np.length<6)return showAuthMsg("Min 6 chars","error");
+  if(np!==cf)return showAuthMsg("Passwords don't match","error");
   try{
-    const u=auth.currentUser;
-    await reauthenticateWithCredential(u,EmailAuthProvider.credential(u.email,cur));
-    await updatePassword(u,np);
-    document.getElementById("currPassword").value="";
-    document.getElementById("newPassword").value="";
-    document.getElementById("confirmNewPassword").value="";
+    await reauthenticateWithCredential(auth.currentUser,EmailAuthProvider.credential(auth.currentUser.email,cur));
+    await updatePassword(auth.currentUser,np);
+    ["currPassword","newPassword","confirmNewPassword"].forEach(id=>document.getElementById(id).value="");
     showAuthMsg("Password updated!","success");
   }catch(err){
-    if(err.code==="auth/wrong-password"||err.code==="auth/invalid-credential")showAuthMsg("Current password incorrect","error");
-    else showAuthMsg(err.message,"error");
+    showAuthMsg(err.code==="auth/wrong-password"?"Current password wrong":err.message,"error");
   }
 };
 
 window.handleSignOut=async function(){
   const btn=document.getElementById("signoutBtn");
   btn.classList.add("signing-out");
-  await savePrefsToCloud();
+  // Save current prefs to cloud before signing out
+  if(auth.currentUser){
+    await setDoc(doc(db,"users",auth.currentUser.uid),{preferences:{font:prefs.font,color:prefs.color}},{merge:true}).catch(()=>{});
+  }
   if(prefsUnsub){prefsUnsub();prefsUnsub=null;}
   await signOut(auth);
-  // Reset to defaults
-  prefs.font="Arial";prefs.color="#ffffff";
+  Object.assign(prefs,defaultPrefs);
   applyPrefsToUI();
   showAuthForms();
   authOverlay.classList.add("active");
@@ -393,15 +393,13 @@ window.addEventListener("keydown",e=>{
 });
 
 window.addEventListener("keydown",e=>{if(e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==="u"){panel.classList.toggle("active");advancedPanel.classList.remove("active");selected=null;document.querySelectorAll(".selected").forEach(e=>e.classList.remove("selected"))}});
-// Store last known username for the account button
-let lastKnownUsername="";
 window.addEventListener("keydown",e=>{if(e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==="l"){e.preventDefault();if(authOverlay.classList.contains("active")){authOverlay.classList.remove("active")}else{if(auth.currentUser){showSignedInView(lastKnownUsername||auth.currentUser.email)}else{showAuthForms()}authOverlay.classList.add("active")}}});
 window.addEventListener("keydown",e=>{if(e.ctrlKey&&e.shiftKey&&e.key.toLowerCase()==="v"){versionPopup.classList.add("show");setTimeout(()=>versionPopup.classList.remove("show"),3000)}});
 advancedBtn.addEventListener("click",()=>{advancedPanel.classList.toggle("active")});
 
 function drawColorWheel(){const w=colorWheelCanvas.width=colorWheelCanvas.offsetWidth;const h=colorWheelCanvas.height=colorWheelCanvas.offsetHeight;const image=ctx.createImageData(w,h);const cx=w/2,cy=h/2,radius=Math.min(w,h)/2;for(let y=0;y<h;y++){for(let x=0;x<w;x++){const dx=x-cx,dy=y-cy,d=Math.sqrt(dx*dx+dy*dy);const idx=(y*w+x)*4;if(d<=radius){let angle=Math.atan2(dy,dx);if(angle<0)angle+=2*Math.PI;let hue=angle/6.283185307179586,sat=d/radius,val=1;const rgb=hsvToRgb(hue,sat,val);image.data[idx]=rgb[0];image.data[idx+1]=rgb[1];image.data[idx+2]=rgb[2];image.data[idx+3]=255}else{image.data[idx+3]=0}}}ctx.putImageData(image,0,0)}
 function hsvToRgb(h,s,v){let r,g,b,i=Math.floor(h*6),f=h*6-i,p=v*(1-s),q=v*(1-f*s),t=v*(1-(1-f)*s);switch(i%6){case 0:r=v,g=t,b=p;break;case 1:r=q,g=v,b=p;break;case 2:r=p,g=v,b=t;break;case 3:r=p,g=q,b=v;break;case 4:r=t,g=p,b=v;break;case 5:r=v,g=p,b=q;break}return[Math.round(r*255),Math.round(g*255),Math.round(b*255)]}
-function pickColor(e){const rect=colorWheelCanvas.getBoundingClientRect();const x=e.clientX-rect.left,y=e.clientY-rect.top;const px=Math.floor(x),py=Math.floor(y);const data=ctx.getImageData(px,py,1,1).data;if(data[3]>0){prefs.color=`rgb(${data[0]},${data[1]},${data[2]})`;applyPrefsToUI();savePrefsToCloud()}}
+function pickColor(e){const rect=colorWheelCanvas.getBoundingClientRect();const x=e.clientX-rect.left,y=e.clientY-rect.top;const px=Math.floor(x),py=Math.floor(y);const data=ctx.getImageData(px,py,1,1).data;if(data[3]>0){setPref("color",`rgb(${data[0]},${data[1]},${data[2]})`)}}
 drawColorWheel();let dragging=false;colorWheelCanvas.addEventListener("mousedown",e=>{dragging=true;pickColor(e)});window.addEventListener("mouseup",()=>dragging=false);colorWheelCanvas.addEventListener("mousemove",e=>{if(dragging)pickColor(e)});window.addEventListener("resize",drawColorWheel);
 
 </script>
